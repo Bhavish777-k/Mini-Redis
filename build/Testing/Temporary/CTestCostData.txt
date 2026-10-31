@@ -1,0 +1,6 @@
+ProtocolTest 3 0.000884542
+KVStoreTest 3 0.000782847
+ConcurrencyTest 3 0.00610571
+PersistenceTest 3 0.12464
+EvictionTest 3 0.000966639
+---

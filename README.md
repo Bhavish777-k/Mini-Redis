@@ -1,0 +1,2 @@
+# Mini-Redis
+OS project

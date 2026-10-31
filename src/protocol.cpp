@@ -54,6 +54,8 @@ bool Protocol::isValid(
         return parts.size() == 1;
     }
 
+    if (command == "RELOADCAP") return parts.size() == 1;
+
     if (command == "SET") {
         return parts.size() == 3;
     }

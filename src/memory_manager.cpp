@@ -72,7 +72,15 @@ std::size_t MemoryManager::usedBytes() const {
     return usedBytes_;
 }
 
+bool MemoryManager::grow(std::size_t bytes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (bytes < maxBytes_) return false;
+    maxBytes_ = bytes;
+    return true;
+}
+
 std::size_t MemoryManager::maxBytes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return maxBytes_;
 }
 

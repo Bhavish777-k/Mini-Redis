@@ -14,6 +14,7 @@
 class KVStore {
 public:
     explicit KVStore(std::size_t maxBytes = 1024 * 1024);
+    bool grow(std::size_t bytes) { return memoryManager_.grow(bytes); }
     std::size_t usedBytes() const { return memoryManager_.usedBytes(); }
     std::size_t maxBytes() const { return memoryManager_.maxBytes(); }
 

@@ -35,6 +35,7 @@ public:
 
     // Return the configured memory limit
     std::size_t maxBytes() const;
+    bool grow(std::size_t bytes);
 
     // Return keys to evict to make room
     std::list<std::string> getEvictionCandidates(
@@ -48,7 +49,7 @@ private:
         std::list<std::string>::iterator position;
     };
 
-    const std::size_t maxBytes_;
+    std::size_t maxBytes_;
 
     std::size_t usedBytes_;
     std::list<std::string> lruList_;

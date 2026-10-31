@@ -1,4 +1,5 @@
 #include "command.h"
+#include <fstream>
 
 #include "kv_store.h"
 #include "persistence.h"
@@ -112,6 +113,21 @@ std::string Command::execute(
         }
 
         return newValue;
+    }
+
+    if (name == "RELOADCAP") {
+        // Only the local owner chooses the budget in this file.
+        std::unique_lock lock(writeMutex_);
+        std::ifstream input("capacity.bytes");
+        std::string text, extra;
+        if (parts.size() != 1 || !(input >> text) || (input >> extra))
+            return "ERR invalid local capacity file";
+        std::size_t n = 0;
+        auto end = text.data() + text.size();
+        auto r = std::from_chars(text.data(), end, n);
+        if (r.ec != std::errc{} || r.ptr != end || n == 0 || !store_.grow(n))
+            return "ERR invalid capacity or decrease";
+        return "OK";
     }
 
     if (name == "STATS") {

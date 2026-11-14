@@ -20,7 +20,9 @@ const {FastKV} = require('fastkv-client');
 
 No third-party dependencies. Node 18+. `timeout` uses milliseconds.
 Keys and values must be whitespace-free single tokens. `get()` maps `(nil)`
-to null; literal `(nil)` is ambiguous. `set(key, value, {ttl})` sends SET and
-then EXPIRE, which **are not an atomic transaction**. Do not automatically
-retry writes after a network error; the write may have committed. The router
+to null; literal `(nil)` is ambiguous. `set(key, value, {ttl})` sends one
+router `SET ... EX` with manager-restart intent recovery (not strict power-loss
+atomicity). `{persist: true}` forces a permanent key, `{keepTTL: true}` retains
+its deadline, and plain `set()` inherits the developer database default set by
+`setDefaultTTL(secondsOrNull)`. Do not automatically retry writes after a network error; the write may have committed. The router
 has no TLS/authentication yet, so use localhost only.

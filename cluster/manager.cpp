@@ -707,6 +707,61 @@ struct ExpiryIndex {
 };
 ExpiryIndex expiryIndex;
 
+// Developer-controlled default lifetime. Unlike per-key deadlines, this value
+// applies only when a write does not provide an explicit lifetime choice.
+struct LifetimePolicy {
+    const fs::path path = fs::path("cluster-data") / "default_ttl.meta";
+    std::optional<Bytes> seconds;
+    void load() {
+        std::ifstream input(path);
+        if (!input) {
+            if (fs::exists(path)) throw std::runtime_error("cannot read default TTL policy");
+            seconds.reset();
+            return;
+        }
+        std::string value, trailing;
+        if (!(input >> value) || (input >> trailing))
+            throw std::runtime_error("corrupt default TTL policy");
+        if (value == "never") { seconds.reset(); return; }
+        Bytes parsed = 0;
+        if (!parseNumber(value, parsed) || parsed == 0 || parsed > 3153600000ULL)
+            throw std::runtime_error("corrupt default TTL policy");
+        seconds = parsed;
+    }
+    void save(std::optional<Bytes> next) {
+        auto temporary = path.string() + ".tmp";
+        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+        if (!out) throw std::runtime_error("cannot create default TTL policy");
+        out << (next ? std::to_string(*next) : "never") << '\n';
+        out.close();
+        if (!out) throw std::runtime_error("cannot save default TTL policy");
+        fs::rename(temporary, path);
+        seconds = next;
+    }
+};
+LifetimePolicy lifetimePolicy;
+
+// One outstanding router write at a time. The intent is written before SET and
+// contains an absolute deadline; retrying it after a manager crash cannot
+// accidentally reset a finite TTL. Not a replacement for fsync-based WAL or
+// multi-process transactional storage.
+struct LifetimeIntent {
+    const fs::path path = fs::path("cluster-data") / "pending_lifetime_write";
+    void record(const std::string& key, const std::string& value,
+                std::optional<Bytes> deadline) {
+        auto temporary = path.string() + ".tmp";
+        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+        if (!out) throw std::runtime_error("cannot open lifetime intent");
+        out << std::quoted(key) << ' ' << std::quoted(value) << ' '
+            << (deadline ? std::to_string(*deadline) : "never") << '\n';
+        out.close();
+        if (!out) throw std::runtime_error("cannot write lifetime intent");
+        fs::rename(temporary, path);
+    }
+    void clear() { if (fs::exists(path)) fs::remove(path); }
+};
+LifetimeIntent lifetimeIntent;
+
 Bytes freeBytes(const Stats& node) {
     return node.max - std::min(node.used, node.max);
 }
@@ -775,12 +830,162 @@ std::string placeValue(const std::string& key, const std::string& value,
     return nodeRequest(target, "SET " + key + " " + value);
 }
 
+// Commit a value and its lifetime as a single router operation. An intent
+// allows recovery if the manager exits between the node write and TTL update.
+std::string writeWithLifetime(Cluster& cluster, const std::string& key,
+                              const std::string& value,
+                              std::optional<Bytes> deadline) {
+    expireOne(cluster, key);
+    int owner = findOwner(cluster, key);
+    std::optional<std::string> oldValue;
+    if (owner) oldValue = nodeRequest(owner, "GET " + key);
+    lifetimeIntent.record(key, value, deadline);
+    auto result = placeValue(key, value, owner, oldValue, cluster);
+    if (result != "OK") { lifetimeIntent.clear(); return result; }
+    if (deadline) expiryIndex.set(key, *deadline);
+    else expiryIndex.clear(key);
+    if (deadline && *deadline <= unixMillis()) expireOne(cluster, key);
+    lifetimeIntent.clear();
+    return "OK";
+}
+
+void recoverLifetimeWrite(Cluster& cluster) {
+    if (!fs::exists(lifetimeIntent.path)) return;
+    std::ifstream input(lifetimeIntent.path, std::ios::binary);
+    std::string key, value, expiration, extra;
+    if (!(input >> std::quoted(key) >> std::quoted(value) >> expiration) ||
+        (input >> extra) || key.empty() || value.empty() ||
+        key.find_first_of(" \t\r\n") != std::string::npos ||
+        value.find_first_of(" \t\r\n") != std::string::npos)
+        throw std::runtime_error("corrupt pending lifetime write");
+    std::optional<Bytes> deadline;
+    if (expiration != "never") {
+        Bytes until = 0;
+        if (!parseNumber(expiration, until) || until == 0)
+            throw std::runtime_error("corrupt pending lifetime deadline");
+        deadline = until;
+    }
+    // Do not repeat a write whose deadline has already elapsed: remove key.
+    if (deadline && *deadline <= unixMillis()) {
+        int owner = findOwner(cluster, key);
+        if (owner) {
+            auto result = nodeRequest(owner, "DEL " + key);
+            if (result != "1" && result != "0")
+                throw std::runtime_error("pending expiration delete failed");
+        }
+        expiryIndex.clear(key);
+        lifetimeIntent.clear();
+        return;
+    }
+    int owner = findOwner(cluster, key);
+    std::optional<std::string> oldValue;
+    if (owner) oldValue = nodeRequest(owner, "GET " + key);
+    auto reply = placeValue(key, value, owner, oldValue, cluster);
+    if (reply != "OK") throw std::runtime_error("pending lifetime recovery failed: " + reply);
+    if (deadline) expiryIndex.set(key, *deadline); else expiryIndex.clear(key);
+    lifetimeIntent.clear();
+}
+
+// SCAN uses hex cursors so it is safe with the current line-delimited wire protocol.
+std::string scanHex(const std::string& value) {
+    static constexpr char chars[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(value.size()*2);
+    for (unsigned char c : value) { result+=chars[c>>4]; result+=chars[c&15]; }
+    return result;
+}
+bool unscanHex(std::string_view encoded, std::string& output) {
+    if (encoded == "-") return true;
+    if (encoded.empty() || encoded.size()%2 || encoded.size()>240) return false;
+    auto digit=[](char c)->int {
+        if (c>='0' && c<='9') return c-'0';
+        if (c>='a' && c<='f') return c-'a'+10;
+        if (c>='A' && c<='F') return c-'A'+10;
+        return -1;
+    };
+    for (std::size_t i=0;i<encoded.size();i+=2) {
+        int h=digit(encoded[i]), l=digit(encoded[i+1]);
+        if (h<0 || l<0) return false;
+        output+=static_cast<char>((h<<4)|l);
+    }
+    return true;
+}
+
 std::string route(const std::string& line, Cluster& cluster) {
     std::istringstream in(line);
     std::string op, key, value, extra;
     in >> op;
     for (char& c : op) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     recoverMove(cluster); // Reconcile any interrupted operation before serving another request.
+    recoverLifetimeWrite(cluster);
+    if (op == "TTLDEFAULT") {
+        std::string action, requested;
+        if (!(in >> action)) return "ERR usage: TTLDEFAULT GET|SET [never|seconds]";
+        for (char& c : action) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        if (action == "GET" && !(in >> extra))
+            return lifetimePolicy.seconds ? std::to_string(*lifetimePolicy.seconds) : "never";
+        if (action == "SET" && (in >> requested) && !(in >> extra)) {
+            if (requested == "never") { lifetimePolicy.save({}); return "OK"; }
+            Bytes seconds=0;
+            if (!parseNumber(requested, seconds) || seconds==0 || seconds>3153600000ULL)
+                return "ERR default TTL must be never or 1..3153600000 seconds";
+            lifetimePolicy.save(seconds);
+            return "OK";
+        }
+        return "ERR usage: TTLDEFAULT GET|SET [never|seconds]";
+    }
+    if (op == "SCAN") {
+        std::string cursorHex, countText, prefixHex, cursor, prefix;
+        Bytes limit=0;
+        if (!(in >> cursorHex >> countText >> prefixHex) || (in >> extra) ||
+            !parseNumber(countText,limit) || limit<1 || limit>50 ||
+            !unscanHex(cursorHex,cursor) || !unscanHex(prefixHex,prefix))
+            return "ERR usage: SCAN <cursor-hex|-> <count:1..50> <prefix-hex|->";
+        // Each node supplies up to count+1 candidates after the same cursor.
+        // A global sorted merge gives stable cursor progress while the keyset is unchanged.
+        std::set<std::string> candidates;
+        for (const auto& node : cluster.nodes) {
+            auto answer = nodeRequest(node->port, "SCAN " + cursorHex + " " +
+                std::to_string(limit+1) + " " + prefixHex);
+            std::istringstream words(answer);
+            std::string header, item;
+            if (!(words >> header) || !header.starts_with("keys="))
+                return "ERR node scan failed: " + answer.substr(0,100);
+            Bytes reported=0;
+            if (!parseNumber(std::string_view(header).substr(5),reported) || reported>limit+1)
+                return "ERR invalid node scan count";
+            Bytes received=0;
+            while (words >> item) {
+                if (!item.starts_with("key=")) return "ERR invalid node scan item";
+                std::string decoded;
+                if (!unscanHex(std::string_view(item).substr(4),decoded))
+                    return "ERR invalid node scan encoding";
+                candidates.insert(std::move(decoded));
+                ++received;
+            }
+            if (received!=reported) return "ERR truncated node scan";
+        }
+        // Expired keys are never returned, even if lazy expiry has not swept them.
+        std::string result, last;
+        Bytes returned=0, inspected=0;
+        bool hasMore=false;
+        for (const auto& candidate : candidates) {
+            // Advance over expired candidates too, so a page of expired keys
+            // never hides live keys that occur later in the ordered index.
+            if (inspected==limit) { hasMore=true; break; }
+            ++inspected;
+            last=candidate;
+            auto expiry=expiryIndex.deadline.find(candidate);
+            if (expiry!=expiryIndex.deadline.end() && expiry->second<=unixMillis()) {
+                expireOne(cluster,candidate);
+                continue;
+            }
+            result += " key=" + scanHex(candidate);
+            ++returned;
+        }
+        return "next=" + (hasMore ? scanHex(last) : std::string("-")) +
+               " count=" + std::to_string(returned) + result;
+    }
     if (op == "EXPIRE" || op == "TTL" || op == "PERSIST") {
         std::string amount;
         if (!(in >> key) || (op == "EXPIRE" && !(in >> amount)) || (in >> extra))
@@ -882,9 +1087,44 @@ std::string route(const std::string& line, Cluster& cluster) {
         }
         return std::to_string(sum);
     }
-    if (op != "GET" && op != "SET" && op != "DEL" && op != "INCR" &&
+    if (op == "SET") {
+        std::string mode, amount;
+        if (!(in >> key >> value)) return "ERR usage: SET key value [EX seconds|PERSIST|KEEPTTL]";
+        if ((in >> mode)) {
+            for (char& ch : mode) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            if (mode == "EX") {
+                if (!(in >> amount) || (in >> extra)) return "ERR usage: SET key value EX seconds";
+            } else if (mode != "PERSIST" && mode != "KEEPTTL")
+                return "ERR SET lifetime must be EX seconds, PERSIST or KEEPTTL";
+            else if (in >> extra) return "ERR unexpected arguments to SET";
+        }
+        std::optional<Bytes> seconds = lifetimePolicy.seconds;
+        if (mode == "EX") {
+            Bytes parsed=0;
+            if (!parseNumber(amount, parsed) || parsed > 3153600000ULL)
+                return "ERR expiration must be 0..3153600000 seconds";
+            seconds=parsed;
+        }
+        if (mode == "PERSIST") seconds.reset();
+        expireOne(cluster, key);
+        if (mode == "KEEPTTL") {
+            auto old = expiryIndex.deadline.find(key);
+            if (old != expiryIndex.deadline.end() && findOwner(cluster, key))
+                return writeWithLifetime(cluster, key, value, old->second);
+            // A new key without an existing deadline inherits the default TTL.
+        }
+        std::optional<Bytes> deadline;
+        if (seconds) {
+            auto now=unixMillis();
+            if (*seconds > (std::numeric_limits<Bytes>::max()-now)/1000)
+                return "ERR expiration overflow";
+            deadline=now+*seconds*1000;
+        }
+        return writeWithLifetime(cluster, key, value, deadline);
+    }
+    if (op != "GET" && op != "DEL" && op != "INCR" &&
         op != "EXISTS" && op != "WHERE") return "ERR unknown or unsupported command";
-    if (!(in >> key) || (op == "SET" && !(in >> value)) || (in >> extra))
+    if (!(in >> key) || (in >> extra))
         return "ERR invalid arguments";
     expireOne(cluster, key);
     int owner = findOwner(cluster, key);
@@ -903,9 +1143,16 @@ std::string route(const std::string& line, Cluster& cluster) {
             if (n == std::numeric_limits<long long>::max()) return "ERR integer overflow";
             value = std::to_string(n + 1);
         }
-        auto status = placeValue(key, value, owner, previous, cluster);
-        if (status == "OK" && op == "SET") expiryIndex.clear(key);
-        return status == "OK" && op == "INCR" ? value : status;
+        std::optional<Bytes> deadline;
+        if (owner) {
+            auto it = expiryIndex.deadline.find(key);
+            if (it != expiryIndex.deadline.end()) deadline = it->second;
+        } else if (lifetimePolicy.seconds) {
+            auto now = unixMillis();
+            deadline = now + *lifetimePolicy.seconds * 1000;
+        }
+        auto status = writeWithLifetime(cluster, key, value, deadline);
+        return status == "OK" ? value : status;
     }
     if (!owner) { expiryIndex.clear(key); return op == "GET" ? "(nil)" : "0"; }
     auto result = nodeRequest(owner, line);
@@ -938,7 +1185,7 @@ class RouterMetrics {
             Clock::now().time_since_epoch()).count();
     }
     static bool monitorOnly(const std::string& op) {
-        return op == "METRICS" || op == "PING" || op == "COUNT" ||
+        return op == "METRICS" || op == "TTLDEFAULT" || op == "PING" || op == "COUNT" ||
                op == "CLUSTER" || op == "OSSTATS" || op == "ALLOCSTATS";
     }
 public:
@@ -1175,6 +1422,8 @@ int main(int argc, char* argv[]) {
         Cluster cluster{binary, capacity, static_cast<unsigned>(limit), {}, replicas == 1, {}, {}};
         cluster.restore();
         expiryIndex.load();
+        lifetimePolicy.load();
+        recoverLifetimeWrite(cluster);
         if (!stopping) recoverMove(cluster);
         Router router;
         auto nextCheck = std::chrono::steady_clock::now();

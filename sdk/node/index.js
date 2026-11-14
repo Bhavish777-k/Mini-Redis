@@ -86,15 +86,29 @@ class FastKV {
   }
   async set(key, value, options = {}) {
     const k = token(key, 'key'), v = token(value, 'value');
-    const {ttl} = options;
+    const {ttl, persist = false, keepTTL = false} = options;
+    if (typeof persist !== 'boolean' || typeof keepTTL !== 'boolean') throw new TypeError('persist and keepTTL must be booleans');
+    if (Number(ttl !== undefined) + Number(persist) + Number(keepTTL) > 1) {
+      throw new TypeError('Choose only one of ttl, persist or keepTTL');
+    }
     if (ttl !== undefined && (!Number.isSafeInteger(ttl) || ttl < 0 || ttl > 3153600000)) {
       throw new RangeError('ttl must be an integer between 0 and 3153600000');
     }
-    const r = await this.command(`SET ${k} ${v}`);
+    const suffix = ttl !== undefined ? ` EX ${ttl}` : persist ? ' PERSIST' : keepTTL ? ' KEEPTTL' : '';
+    const r = await this.command(`SET ${k} ${v}${suffix}`);
     if (r !== 'OK') throw new FastKVProtocolError(`Expected OK from SET, got ${JSON.stringify(r)}`);
-    if (ttl !== undefined && !await this.expire(k, ttl)) {
-      throw new FastKVProtocolError('SET succeeded but EXPIRE did not set the TTL');
+    return true;
+  }
+  async getDefaultTTL() {
+    const result = await this.command('TTLDEFAULT GET');
+    return result === 'never' ? null : integer(result, 'TTLDEFAULT GET');
+  }
+  async setDefaultTTL(seconds = null) {
+    if (seconds !== null && (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 3153600000)) {
+      throw new RangeError('default TTL must be null or an integer between 1 and 3153600000');
     }
+    const result = await this.command('TTLDEFAULT SET ' + (seconds === null ? 'never' : seconds));
+    if (result !== 'OK') throw new FastKVProtocolError(`Expected OK from TTLDEFAULT, got ${JSON.stringify(result)}`);
     return true;
   }
   async get(key) { const r = await this.command(`GET ${token(key, 'key')}`); return r === '(nil)' ? null : r; }

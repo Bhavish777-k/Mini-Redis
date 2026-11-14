@@ -42,6 +42,8 @@ def main(argv=None) -> int:
         if line.lower() in ("help", "?"):
             print("Commands: PING, SET key value, GET key, DEL key, EXISTS key, INCR key, "
                   "EXPIRE key seconds, TTL key, PERSIST key, WHERE key, COUNT, "
+                  "SET key value EX seconds, SET key value PERSIST, SET key value KEEPTTL, "
+                  "TTLDEFAULT GET, TTLDEFAULT SET seconds|never, "
                   "CLUSTER STATUS, ALLOCSTATS, OSSTATS. Type exit to quit.")
             print("Current protocol supports only one whitespace-free token per key/value.")
             continue

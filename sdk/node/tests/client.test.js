@@ -9,6 +9,7 @@ async function mockServer() {
   const commands = [];
   const store = new Map();
   const expires = new Map();
+  let defaultTTL = null;
   const server = net.createServer(sock => {
     let data = '';
     sock.on('data', chunk => {
@@ -19,7 +20,18 @@ async function mockServer() {
       const [op, k, v] = line.split(' ');
       let out = 'ERR unknown';
       if (op === 'PING') out = 'PONG';
-      if (op === 'SET') { store.set(k, v); expires.delete(k); out = 'OK'; }
+      if (op === 'TTLDEFAULT') { if (k === 'GET') out = defaultTTL === null ? 'never' : String(defaultTTL); else {defaultTTL = v === 'never' ? null : Number(v); out = 'OK';} }
+      if (op === 'SET') {
+        const prior = expires.get(k);
+        store.set(k, v);
+        const bits = line.split(' ');
+        if (bits[3] === 'EX') expires.set(k, Number(bits[4]));
+        else if (bits[3] === 'PERSIST') expires.delete(k);
+        else if (bits[3] === 'KEEPTTL' && prior !== undefined) expires.set(k, prior);
+        else if (defaultTTL !== null) expires.set(k, defaultTTL);
+        else expires.delete(k);
+        out = 'OK';
+      }
       if (op === 'GET') out = store.get(k) ?? '(nil)';
       if (op === 'DEL') out = String(Number(store.delete(k)));
       if (op === 'EXISTS') out = String(Number(store.has(k)));
@@ -65,7 +77,13 @@ test('typed commands, TTL and error handling', async (t) => {
   assert.equal(await db.delete('session'), true);
   assert.equal(await db.delete('session'), false);
   assert.equal(await db.expire('session', 5), false);
-  assert(commands.includes('EXPIRE session 15'));
+  assert(commands.includes('SET session active EX 15'));
+  assert.equal(await db.setDefaultTTL(300), true);
+  assert.equal(await db.getDefaultTTL(), 300);
+  assert.equal(await db.set('defaultKey', 'v'), true);
+  assert.equal(await db.ttl('defaultKey'), 300);
+  assert.equal(await db.set('perm', 'v', {persist: true}), true);
+  assert.equal(await db.ttl('perm'), -1);
   await assert.rejects(db.command('UNKNOWN'), FastKVCommandError);
   await assert.rejects(db.get('bad\nkey'), TypeError);
   await assert.rejects(db.set('key', 'two words'), TypeError);

@@ -43,15 +43,23 @@ class Server(socketserver.ThreadingTCPServer):
 
 @contextlib.contextmanager
 def fake_router():
-    store, expiry = {}, {}
+    store, expiry, policy = {}, {}, {"default": None}
 
     def respond(command):
         parts = command.split()
         op = parts[0].upper()
         if op == 'PING': return 'PONG'
+        if op == 'TTLDEFAULT':
+            if parts[1] == 'GET': return str(policy['default']) if policy['default'] is not None else 'never'
+            policy['default'] = None if parts[2] == 'never' else int(parts[2]); return 'OK'
         if op == 'SET':
+            old_ttl = expiry.get(parts[1])
             store[parts[1]] = parts[2]
-            expiry.pop(parts[1], None)
+            if len(parts) == 5 and parts[3] == 'EX': expiry[parts[1]] = int(parts[4])
+            elif len(parts) == 4 and parts[3] == 'PERSIST': expiry.pop(parts[1], None)
+            elif len(parts) == 4 and parts[3] == 'KEEPTTL' and old_ttl is not None: expiry[parts[1]] = old_ttl
+            elif policy['default'] is not None: expiry[parts[1]] = policy['default']
+            else: expiry.pop(parts[1], None)
             return 'OK'
         if op == 'GET': return store.get(parts[1], '(nil)')
         if op == 'EXISTS': return str(int(parts[1] in store))
@@ -97,13 +105,19 @@ class SDKTests(unittest.TestCase):
             self.assertTrue(db.set('user:1', 'alice', ttl=123))
             self.assertEqual(db.get('user:1'), 'alice')
             self.assertEqual(db.ttl('user:1'), 123)
+            self.assertTrue(db.set_default_ttl(600))
+            self.assertEqual(db.get_default_ttl(), 600)
+            self.assertTrue(db.set('short', 'value'))
+            self.assertEqual(db.ttl('short'), 600)
+            self.assertTrue(db.set('forever', 'value', persist=True))
+            self.assertEqual(db.ttl('forever'), -1)
             self.assertEqual(db.where('user:1'), 6381)
             self.assertTrue(db.exists('user:1'))
             self.assertTrue(db.persist('user:1'))
             self.assertEqual(db.ttl('user:1'), -1)
             self.assertTrue(db.set('counter', 4))
             self.assertEqual(db.incr('counter'), 5)
-            self.assertEqual(db.count(), 2)
+            self.assertEqual(db.count(), 4)
             self.assertTrue(db.delete('user:1'))
             self.assertFalse(db.delete('user:1'))
             self.assertFalse(db.expire('user:1', 3))
@@ -111,7 +125,7 @@ class SDKTests(unittest.TestCase):
             self.assertIn('memory=0', db.os_stats())
             self.assertIn('slab=0', db.alloc_stats())
             self.assertEqual(server.commands[:3], ['PING', 'GET absent', 'WHERE absent'])
-            self.assertIn('EXPIRE user:1 123', server.commands)
+            self.assertIn('SET user:1 alice EX 123', server.commands)
 
     def test_errors_no_injection_and_nonretry(self):
         with fake_router() as server:

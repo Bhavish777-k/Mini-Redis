@@ -24,6 +24,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+try:
+    from .backup_ops import BackupError, archive_path, create_backup, list_backups, restore_backup, verify_archive
+except ImportError:  # launched as python dashboard/app.py
+    from backup_ops import BackupError, archive_path, create_backup, list_backups, restore_backup, verify_archive
+
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = Path(__file__).resolve().parent / "static"
 HOST = "127.0.0.1"
@@ -290,11 +295,189 @@ class Controller:
             if value == '':
                 raise UserError("Provide a non-empty value")
             command += ' ' + value
+        if action == 'SET':
+            # Same lifetime policy as SDK and CLI. A missing mode inherits
+            # the database default. Explicit permanent is not the same thing.
+            suffix = self._lifetime_suffix(payload)
+            command += suffix
         response = wire(command, port=self.router_port)
         if response.startswith('ERR'):
             raise UserError(response)
         self._event(f"{action} {key}")
         return {"reply": response}
+
+    @staticmethod
+    def _lifetime_suffix(payload):
+        mode = payload.get('ttl_mode', 'default')
+        if mode == 'default': return ''
+        if mode == 'never': return ' PERSIST'
+        if mode == 'keep': return ' KEEPTTL'
+        if mode == 'seconds':
+            seconds = payload.get('ttl_seconds')
+            if type(seconds) is not int or not 1 <= seconds <= 3153600000:
+                raise UserError('TTL must be an integer between 1 and 3153600000 seconds')
+            return ' EX ' + str(seconds)
+        raise UserError('Choose Database default, Keep existing, Never or custom TTL')
+
+    def ttl_policy(self, payload):
+        if not isinstance(payload, dict): raise UserError('Invalid TTL policy')
+        mode = payload.get('mode')
+        if mode == 'never': requested = 'never'
+        elif mode == 'seconds':
+            seconds = payload.get('seconds')
+            if type(seconds) is not int or not 1 <= seconds <= 3153600000:
+                raise UserError('Database default TTL must be 1..3153600000 seconds')
+            requested = str(seconds)
+        else: raise UserError('Choose Never expire or seconds')
+        answer = wire('TTLDEFAULT SET ' + requested, port=self.router_port)
+        if answer != 'OK': raise UserError(answer)
+        self._event('Updated developer default TTL to ' + requested)
+        return {'default_ttl': None if requested == 'never' else int(requested)}
+
+    # Phase 11: a bounded key browser; all operations go through the router.
+    @staticmethod
+    def _browser_key(payload):
+        key = payload.get('key') if isinstance(payload, dict) else None
+        if not isinstance(key, str) or not VALID_KEY.fullmatch(key) or len(key.encode('utf-8')) > 120:
+            raise UserError('Key must be 1–120 UTF-8 bytes without whitespace/control characters')
+        return key
+
+    @staticmethod
+    def _browser_ttl(payload):
+        mode = payload.get('ttl_mode')
+        if mode in ('default', 'never', 'keep'):
+            return None
+        if mode != 'seconds':
+            raise UserError('Choose default, keep, never or a positive TTL')
+        seconds = payload.get('ttl_seconds')
+        if type(seconds) is not int or not 1 <= seconds <= 3153600000:
+            raise UserError('TTL must be an integer between 1 and 3153600000 seconds')
+        return seconds
+
+    def browser_scan(self, payload):
+        if not isinstance(payload, dict):
+            raise UserError('Invalid scan request')
+        limit = payload.get('limit', 20)
+        cursor = payload.get('cursor', '-')
+        prefix = payload.get('prefix', '')
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise UserError('Page size must be between 1 and 50')
+        if not isinstance(cursor, str) or (cursor != '-' and
+            (not cursor or len(cursor) > 240 or len(cursor) % 2 or
+             any(x not in '0123456789abcdefABCDEF' for x in cursor))):
+            raise UserError('Invalid cursor')
+        if not isinstance(prefix, str) or (prefix and (not VALID_KEY.fullmatch(prefix) or
+            len(prefix.encode('utf-8')) > 120)):
+            raise UserError('Invalid prefix')
+        answer = wire('SCAN {} {} {}'.format(cursor, limit, prefix.encode('utf-8').hex() or '-'),
+                      port=self.router_port, timeout=3)
+        if answer.startswith('ERR'):
+            raise UserError(answer)
+        parts = answer.split(' ')
+        if len(parts) < 2 or not parts[0].startswith('next=') or not parts[1].startswith('count='):
+            raise UserError('Invalid SCAN response')
+        next_cursor = parts[0][5:]
+        try:
+            count = int(parts[1][6:])
+            rows = []
+            for item in parts[2:]:
+                if not item.startswith('key='): raise ValueError('Invalid key field')
+                try:
+                    key = bytes.fromhex(item[4:]).decode('utf-8')
+                except UnicodeDecodeError:
+                    continue  # Binary keys cannot be edited in the text-only browser.
+                if not VALID_KEY.fullmatch(key) or len(key.encode('utf-8')) > 120: continue
+                ttl = wire('TTL ' + key, port=self.router_port, timeout=2)
+                if ttl == '-2': continue
+                if not ttl.lstrip('-').isdigit(): raise ValueError('Invalid TTL')
+                owner = wire('WHERE ' + key, port=self.router_port, timeout=2)
+                if owner == '(nil)': continue
+                rows.append({'key': key, 'ttl': int(ttl), 'owner': owner})
+            if len(parts)-2 != count: raise ValueError('Invalid scan count')
+        except (ValueError, UnicodeError) as exc:
+            raise UserError('Invalid SCAN response') from exc
+        return {'items': rows, 'next_cursor': next_cursor, 'limit': limit,
+                'prefix': prefix, 'may_change': True}
+
+    def browser_detail(self, payload):
+        key = self._browser_key(payload)
+        owner = wire('WHERE ' + key, port=self.router_port)
+        if owner == '(nil)':
+            return {'key': key, 'found': False}
+        value = wire('GET ' + key, port=self.router_port)
+        ttl = wire('TTL ' + key, port=self.router_port)
+        if ttl == '-2': return {'key': key, 'found': False}
+        if not ttl.lstrip('-').isdigit():
+            raise UserError('Unable to read key safely')
+        return {'key': key, 'found': True, 'value': value, 'ttl': int(ttl), 'owner': owner}
+
+    def browser_save(self, payload):
+        key = self._browser_key(payload)
+        value = payload.get('value')
+        if not isinstance(value, str) or not VALID_VALUE.fullmatch(value):
+            raise UserError('Value must be 1–2048 characters without whitespace')
+        ttl = self._browser_ttl(payload)
+        overwrite = payload.get('overwrite', False)
+        if type(overwrite) is not bool: raise UserError('Invalid overwrite flag')
+        if not overwrite and wire('WHERE ' + key, port=self.router_port) != '(nil)':
+            raise UserError('Key already exists. Open it to edit instead.')
+        command = 'SET ' + key + ' ' + value + self._lifetime_suffix(payload)
+        result = wire(command, port=self.router_port)
+        if result != 'OK': raise UserError(result)
+        self._event(('Updated' if overwrite else 'Created') + ' key ' + key)
+        return {'key':key, 'saved':True, 'ttl_seconds':ttl,
+                'lifetime_mode':payload.get('ttl_mode','default')}
+
+    def browser_expire(self, payload):
+        key = self._browser_key(payload)
+        ttl = self._browser_ttl(payload)
+        if wire('WHERE ' + key, port=self.router_port) == '(nil)':
+            raise UserError('Key does not exist')
+        mode = payload.get('ttl_mode')
+        if mode == 'keep':
+            return {'key': key, 'ttl_seconds': None, 'applied': False}
+        if mode == 'default':
+            setting = wire('TTLDEFAULT GET', port=self.router_port)
+            if setting == 'never': ttl = None
+            elif setting.isdigit(): ttl = int(setting)
+            else: raise UserError('Unable to read default TTL policy')
+        cmd = ('PERSIST ' + key) if ttl is None else ('EXPIRE ' + key + ' ' + str(ttl))
+        result = wire(cmd, port=self.router_port)
+        if result not in ('0', '1') or (ttl is not None and result != '1'):
+            raise UserError(result)
+        self._event('Changed expiration for ' + key)
+        return {'key':key,'ttl_seconds':ttl,'applied':True}
+
+    def browser_delete(self, payload):
+        key = self._browser_key(payload)
+        if payload.get('confirmation') != key:
+            raise UserError('Confirm the exact key to delete')
+        result = wire('DEL ' + key, port=self.router_port)
+        if result not in ('0','1'): raise UserError(result)
+        self._event('Deleted key ' + key)
+        return {'key':key,'deleted':result == '1'}
+
+    def backup_create(self):
+        with self.lock:
+            if self.process and self.process.poll() is None:
+                raise UserError("Stop this dashboard's cluster before making an offline backup")
+            result = create_backup(self.root)
+            self._event(f"Created verified offline backup {result['name']}")
+            return result
+
+    def backup_verify(self, payload):
+        name = payload.get('name') if isinstance(payload, dict) else None
+        return verify_archive(archive_path(self.root, name))
+
+    def backup_restore(self, payload):
+        if not isinstance(payload, dict):
+            raise UserError("Choose a backup and confirm restoration")
+        with self.lock:
+            if self.process and self.process.poll() is None:
+                raise UserError("Stop this dashboard's cluster before restoring")
+            result = restore_backup(self.root, payload.get('name'), confirmation=payload.get('confirmation'))
+            self._event(f"Restored {result['name']}; previous data saved in backups/{result['previous_data']}")
+            return result
 
     def recent_logs(self):
         try:
@@ -340,6 +523,11 @@ class Controller:
                 data["metrics"] = parse_metrics(wire("METRICS", port=self.router_port, timeout=0.7))
             except (ConnectionError, ValueError):
                 data["metrics"] = None
+            try:
+                lifetime = wire('TTLDEFAULT GET', port=self.router_port, timeout=0.7)
+                data['default_ttl'] = None if lifetime == 'never' else int(lifetime)
+            except (ConnectionError, ValueError):
+                data['default_ttl'] = None
             try:
                 data["key_count"] = int(wire("COUNT", port=self.router_port, timeout=0.7))
             except (ConnectionError, ValueError):
@@ -392,6 +580,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(200, self.control.status())
         if path == '/api/logs':
             return self.json(200, {"lines": self.control.recent_logs()})
+        if path == '/api/backups':
+            try:
+                return self.json(200, {'items': list_backups(self.control.root)})
+            except BackupError as exc:
+                return self.json(409, {'error': str(exc)})
         if path == '/api/session':
             return self.json(200, {"csrf": self.control.token})
         if path in ('/', '/index.html'):
@@ -427,12 +620,30 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.control.resize(payload)
             elif self.path == '/api/key':
                 result = self.control.data_command(payload)
+            elif self.path == '/api/ttl-policy':
+                result = self.control.ttl_policy(payload)
+            elif self.path == '/api/keys/scan':
+                result = self.control.browser_scan(payload)
+            elif self.path == '/api/keys/detail':
+                result = self.control.browser_detail(payload)
+            elif self.path == '/api/keys/save':
+                result = self.control.browser_save(payload)
+            elif self.path == '/api/keys/expire':
+                result = self.control.browser_expire(payload)
+            elif self.path == '/api/keys/delete':
+                result = self.control.browser_delete(payload)
+            elif self.path == '/api/backup/create':
+                result = self.control.backup_create()
+            elif self.path == '/api/backup/verify':
+                result = self.control.backup_verify(payload)
+            elif self.path == '/api/backup/restore':
+                result = self.control.backup_restore(payload)
             else:
                 return self.json(404, {"error": "Unknown endpoint"})
             return self.json(200, {"ok": True, "data": result})
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             return self.json(400, {"error": f"Invalid input: {exc}"})
-        except (UserError, ConnectionError) as exc:
+        except (UserError, ConnectionError, BackupError) as exc:
             return self.json(409, {"error": str(exc)})
         except OSError as exc:
             return self.json(500, {"error": f"OS operation failed: {exc}"})

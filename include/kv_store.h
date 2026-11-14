@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <list>
 #include <optional>
+#include <vector>
 #include <memory_resource>
 
 #include "slab_allocator.h"
@@ -39,6 +40,11 @@ public:
 
     // Return the number of keys
     std::size_t count() const;
+
+    // Bounded lexicographic page, without building a full key snapshot.
+    // Best-effort under concurrent writes; new keys before the cursor may be missed.
+    std::vector<std::string> scanAfter(const std::string& cursor,
+        const std::string& prefix, std::size_t limit) const;
 
     std::optional<std::list<std::string>> evictionsForSet(
     const std::string& key,

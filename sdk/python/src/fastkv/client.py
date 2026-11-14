@@ -110,18 +110,39 @@ class FastKV:
         return True
 
     def set(self, key: Union[str, int], value: Union[str, int], *,
-            ttl: Optional[int] = None) -> bool:
+            ttl: Optional[int] = None, persist: bool = False,
+            keep_ttl: bool = False) -> bool:
+        """Write a key. Unspecified TTL inherits the database policy.
+
+        persist=True explicitly disables expiration; keep_ttl=True preserves an
+        existing deadline. These modes cannot be combined with ttl.
+        """
         k, v = _token(key, name="key"), _token(value, name="value")
-        if ttl is not None and (not isinstance(ttl, int) or isinstance(ttl, bool)
-                                or not 0 <= ttl <= 3153600000):
+        if type(persist) is not bool or type(keep_ttl) is not bool:
+            raise TypeError("persist and keep_ttl must be booleans")
+        if int(ttl is not None) + int(persist) + int(keep_ttl) > 1:
+            raise ValueError("Select only one of ttl, persist or keep_ttl")
+        if ttl is not None and (type(ttl) is not int or not 0 <= ttl <= 3153600000):
             raise ValueError("ttl must be an integer between 0 and 3153600000")
-        response = self.command(f"SET {k} {v}")
+        suffix = (f" EX {ttl}" if ttl is not None else
+                  " PERSIST" if persist else " KEEPTTL" if keep_ttl else "")
+        response = self.command(f"SET {k} {v}{suffix}")
         if response != "OK":
             raise FastKVProtocolError(f"Expected OK from SET, got {response!r}")
-        if ttl is not None:
-            # Not atomic in the current router protocol. If EXPIRE fails, SET may persist.
-            if not self.expire(k, ttl):
-                raise FastKVProtocolError("SET succeeded but EXPIRE did not set the TTL")
+        return True
+
+    def get_default_ttl(self) -> Optional[int]:
+        result = self.command("TTLDEFAULT GET")
+        return None if result == "never" else _integer(result, "TTLDEFAULT GET")
+
+    def set_default_ttl(self, seconds: Optional[int]) -> bool:
+        """Set the database-wide policy for future writes; None = never expire."""
+        if seconds is not None and (type(seconds) is not int or
+                                    not 1 <= seconds <= 3153600000):
+            raise ValueError("default TTL must be None or 1..3153600000 seconds")
+        result = self.command("TTLDEFAULT SET " + ("never" if seconds is None else str(seconds)))
+        if result != "OK":
+            raise FastKVProtocolError(f"Expected OK from TTLDEFAULT, got {result!r}")
         return True
 
     def get(self, key: Union[str, int]) -> Optional[str]:

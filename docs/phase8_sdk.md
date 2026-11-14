@@ -71,7 +71,7 @@ print(db.get('username'))
 
 - Keys and values are **single whitespace-free tokens**; spaces/newlines and binary data are not supported by the existing server's line-based protocol.
 - The `(nil)` sentinel makes a stored literal value `(nil)` indistinguishable from a missing key. Avoid that value until protocol v2.
-- `set(..., ttl=...)` performs `SET` then `EXPIRE`, not an atomic transaction. Between the commands, the key may be visible without a TTL; if EXPIRE fails, the SET may have succeeded.
+- Phase 11.1 upgrades `set(..., ttl=...)` to one router `SET ... EX seconds` request with a recoverable manager-side write intent. This does not guarantee strict power-loss atomicity or multi-node transactions. Plain `set()` inherits the developer database default; `persist` and `keep_ttl`/`keepTTL` are explicit overrides.
 - Reads and writes each make a **new TCP connection**; connection pooling is a later optimization.
 - Never blindly retry failed mutation calls (`SET`, `INCR`, etc.): a lost reply does not mean the write failed.
 - The current router is localhost-only and offers no authentication, TLS, or tenant isolation. Do **not** expose directly to the public internet.

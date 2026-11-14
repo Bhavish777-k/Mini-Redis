@@ -9,3 +9,10 @@
 /fastkv_allocator_phase3/
 /fastkv_os_limits_phase4/
 /fastkv_replication_phase2/
+
+# Python generated files
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+.venv/

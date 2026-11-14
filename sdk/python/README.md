@@ -26,6 +26,9 @@ One-shot: `fastkv-cli GET username` or `fastkv-cli --command 'CLUSTER STATUS'`.
 The SDK uses **one TCP connection per command** to the **router**, not individual
 storage node ports. Only whitespace-free keys and values are supported by the
 current server protocol. `get()` maps `(nil)` to `None`, so the literal value
-`(nil)` is ambiguous. `set(..., ttl=...)` issues SET followed by EXPIRE; these
-are **not atomic**. Never automatically retry mutations after a network failure:
+`(nil)` is ambiguous. `set(..., ttl=...)` uses one router `SET ... EX`
+operation, with manager-restart intent recovery (not strict power-loss atomicity).
+`set(..., persist=True)` makes a key permanent; `set(..., keep_ttl=True)`
+retains an existing deadline; a plain `set()` inherits the database default,
+configured with `set_default_ttl(seconds_or_None)`. Never automatically retry mutations after a network failure:
 the write outcome may be unknown. Local self-hosted use only; no auth/TLS yet.

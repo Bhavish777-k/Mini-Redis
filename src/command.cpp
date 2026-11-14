@@ -5,6 +5,7 @@
 #include "persistence.h"
 
 #include <charconv>
+#include <cstdint>
 #include <limits>
 #include <mutex>
 #include <shared_mutex>
@@ -152,6 +153,43 @@ std::string Command::execute(
     if (name == "COUNT") {
         std::shared_lock<std::shared_mutex> readLock(writeMutex_);
         return std::to_string(store_.count());
+    }
+
+    if (name == "SCAN") {
+        // SCAN <cursor-hex | -> <count> <prefix-hex | ->.
+        // All keys are hex-encoded to avoid separators/newlines in the wire format.
+        if (parts.size() != 4) return "ERR usage: SCAN cursor count prefix";
+        auto decode = [](const std::string& hex, std::string& out) {
+            if (hex == "-") return true;
+            if (hex.size() == 0 || hex.size() % 2 || hex.size() > 240) return false;
+            auto digit = [](char ch)->int {
+                if (ch >= '0' && ch <= '9') return ch-'0';
+                if (ch >= 'a' && ch <= 'f') return ch-'a'+10;
+                if (ch >= 'A' && ch <= 'F') return ch-'A'+10;
+                return -1;
+            };
+            for (std::size_t j=0;j<hex.size();j+=2) {
+                int hi=digit(hex[j]), lo=digit(hex[j+1]);
+                if (hi<0 || lo<0) return false;
+                out.push_back(static_cast<char>(hi*16+lo));
+            }
+            return true;
+        };
+        std::uint64_t limit=0;
+        const auto parsed=std::from_chars(parts[2].data(), parts[2].data()+parts[2].size(), limit);
+        if (parsed.ec!=std::errc{} || parsed.ptr!=parts[2].data()+parts[2].size() || limit<1 || limit>51)
+            return "ERR SCAN count must be 1..51";
+        std::string cursor, prefix;
+        if (!decode(parts[1],cursor) || !decode(parts[3],prefix)) return "ERR invalid SCAN hex";
+        static constexpr char HEX[]="0123456789abcdef";
+        std::shared_lock<std::shared_mutex> readLock(writeMutex_);
+        auto keys=store_.scanAfter(cursor,prefix,static_cast<std::size_t>(limit));
+        std::string response="keys="+std::to_string(keys.size());
+        for (const auto& key : keys) {
+            response += " key=";
+            for (unsigned char ch : key) { response += HEX[ch>>4]; response += HEX[ch&15]; }
+        }
+        return response;
     }
 
     if (name == "KEYS") {

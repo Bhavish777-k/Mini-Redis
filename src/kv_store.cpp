@@ -4,6 +4,8 @@
 #include <functional>
 #include <mutex>
 #include <shared_mutex>
+#include <set>
+#include <vector>
 #include <string>
 
 KVStore::KVStore(std::size_t maxBytes)
@@ -84,6 +86,34 @@ std::size_t KVStore::count() const {
     }
 
     return total;
+}
+
+std::vector<std::string> KVStore::scanAfter(const std::string& cursor,
+        const std::string& prefix, std::size_t limit) const {
+    // Bounded memory: retain only the smallest `limit` candidates greater than cursor.
+    // Individual shard locks prevent concurrent map mutation while inspecting a shard.
+    std::set<std::string> selected;
+    if (limit == 0 || limit > 51) return {};
+    for (const Shard& shard : shards_) {
+        std::shared_lock<std::shared_mutex> lock(shard.mutex);
+        for (const auto& entry : shard.data) {
+            const auto& key = entry.first;
+            // Browser addresses keys of <=120 UTF-8 bytes without control/space.
+            // Existing binary/oversize keys remain usable through normal GET/DEL.
+            if (key.empty() || key.size() > 120) continue;
+            bool displayable = true;
+            for (unsigned char c : key) {
+                if (c <= 32 || c == 127) { displayable = false; break; }
+            }
+            if (!displayable) continue;
+            if (!cursor.empty() && key <= cursor) continue;
+            if (!prefix.empty() && key.compare(0, prefix.size(), prefix) != 0) continue;
+            if (selected.size() == limit && key >= *selected.rbegin()) continue;
+            selected.insert(key);
+            if (selected.size() > limit) selected.erase(std::prev(selected.end()));
+        }
+    }
+    return {selected.begin(), selected.end()};
 }
 
 std::optional<std::list<std::string>> KVStore::evictionsForSet(

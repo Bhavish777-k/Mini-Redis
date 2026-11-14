@@ -10,7 +10,9 @@ export class FastKV {
   readonly timeout: number;
   command(command: string): Promise<string>;
   ping(): Promise<boolean>;
-  set(key: string | number, value: string | number, options?: {ttl?: number}): Promise<boolean>;
+  set(key: string | number, value: string | number, options?: {ttl?: number; persist?: boolean; keepTTL?: boolean}): Promise<boolean>;
+  getDefaultTTL(): Promise<number | null>;
+  setDefaultTTL(seconds?: number | null): Promise<boolean>;
   get(key: string | number): Promise<string | null>;
   delete(key: string | number): Promise<boolean>;
   exists(key: string | number): Promise<boolean>;

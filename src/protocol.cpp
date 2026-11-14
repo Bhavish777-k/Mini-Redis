@@ -55,6 +55,8 @@ bool Protocol::isValid(
         return parts.size() == 1;
     }
 
+    if (command == "SCAN") return parts.size() == 4;
+
     if (command == "RELOADCAP") return parts.size() == 1;
 
     if (command == "SET") {

@@ -14,7 +14,7 @@
 #include <cstdio>
 #include <future>
 #include <iostream>
-#include <map>
+#include <unordered_map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -175,55 +175,84 @@ bool Server::start() {
 
     EventLoop loop;
     Command commands(store_, persistence_);
-    std::map<int, Client> clients;
+    std::unordered_map<int, Client> clients;
     bool ok = true;
+    std::cout << "I/O backend: " << loop.backendName() << '\n';
     std::cout << "Server listening on port " << port_ << '\n';
 
-    while (!stopping_.load()) {
-        std::vector<pollfd> watch{
-            {listener, POLLIN, 0},
-            {wake[0], POLLIN, 0}
-        };
+    if (!loop.set(listener, POLLIN) || !loop.set(wake[0], POLLIN)) {
+        std::perror("register listener");
+        ok = false;
+    }
 
-        for (auto& [fd, client] : clients) {
-            prepare(client, pool_, commands, wake[1]);
-            if (client.job.valid()) continue;
-
-            short interest = client.reply.empty() ? POLLIN : POLLOUT;
-            watch.push_back({fd, interest, 0});
+    auto refresh = [&](int fd, Client& c) -> bool {
+        prepare(c, pool_, commands, wake[1]);
+        short interest = c.job.valid() ? 0 : (c.reply.empty() ? POLLIN : POLLOUT);
+        if (!loop.set(fd, interest)) {
+            std::perror("register client");
+            return false;
         }
+        return true;
+    };
+    auto drop = [&](int fd) {
+        loop.remove(fd);
+        close(fd);
+        clients.erase(fd);
+    };
 
-        int ready = loop.wait(watch, 100);
-        if (ready < 0) {
-            std::perror("poll");
+    while (ok && !stopping_.load()) {
+        std::vector<EventLoop::Ready> ready;
+        if (loop.wait(ready, 100) < 0) {
+            std::perror("wait for I/O");
             ok = false;
             break;
         }
-        if (ready == 0) continue;
 
-        if (watch[1].revents & POLLIN) {
-            char bytes[256];
-            while (read(wake[0], bytes, sizeof(bytes)) > 0) {}
-        }
-
-        if (watch[0].revents & POLLIN) {
-            int fd = accept(listener, nullptr, nullptr);
-            if (fd >= 0) {
-                if (nonblocking(fd)) clients.try_emplace(fd);
-                else close(fd);
-            } else if (!retryable() && errno != ECONNABORTED) {
-                std::perror("accept");
-                ok = false;
-                break;
+        bool woke = false;
+        for (const auto& event : ready) {
+            if (event.fd == wake[0]) {
+                if (event.events & POLLIN) {
+                    char bytes[256];
+                    while (read(wake[0], bytes, sizeof(bytes)) > 0) {}
+                    woke = true;
+                }
+            } else if (event.fd == listener) {
+                if (event.events & POLLIN) {
+                    // Accept bursts without letting an incoming flood starve active clients.
+                    for (int i = 0; i < 64; ++i) {
+                        int fd = accept(listener, nullptr, nullptr);
+                        if (fd < 0) {
+                            if (!retryable() && errno != ECONNABORTED) {
+                                std::perror("accept");
+                                ok = false;
+                            }
+                            break;
+                        }
+                        if (!nonblocking(fd)) { close(fd); continue; }
+                        auto [it, inserted] = clients.try_emplace(fd);
+                        if (!inserted || !refresh(fd, it->second)) drop(fd);
+                    }
+                }
+            } else {
+                auto it = clients.find(event.fd);
+                if (it == clients.end()) continue;
+                if (!service(event.fd, event.events, it->second) ||
+                    !refresh(event.fd, it->second)) drop(event.fd);
             }
         }
 
-        for (std::size_t i = 2; i < watch.size(); ++i) {
-            int fd = watch[i].fd;
-            short events = watch[i].revents;
-            if (events && !service(fd, events, clients.at(fd))) {
-                close(fd);
-                clients.erase(fd);
+        // Worker jobs notify the reactor through a nonblocking pipe. Only
+        // check pending futures after a wake-up, not on every I/O event.
+        if (woke) {
+            for (auto it = clients.begin(); it != clients.end();) {
+                int fd = it->first;
+                Client& c = it->second;
+                if (c.job.valid() &&
+                    c.job.wait_for(std::chrono::seconds(0)) == std::future_status::ready &&
+                    !refresh(fd, c)) {
+                    ++it;
+                    drop(fd);
+                } else ++it;
             }
         }
     }

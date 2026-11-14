@@ -111,3 +111,12 @@ add_executable(test_slab_allocator tests/test_slab_allocator.cpp
     src/slab_allocator.cpp src/kv_store.cpp src/memory_manager.cpp)
 target_link_libraries(test_slab_allocator PRIVATE Threads::Threads)
 add_test(NAME SlabAllocatorTest COMMAND test_slab_allocator)
+
+# Real TCP reactor regression (native epoll/kqueue and forced poll fallback).
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME EventLoopIntegration
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_event_loop_io.py
+            $<TARGET_FILE:fast-kv>)
+endif()

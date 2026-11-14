@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Fast-KV owner control plane, localhost-only and standard-library-only.
+"""Fast-KV cluster dashboard and lifecycle control plane.
 
 Run from any directory with: python3 dashboard/app.py
 The cluster manager and KV node binaries are built in <repo>/build-debug.
-This is intentionally NOT a public internet-facing multi-tenant control plane.
 """
 from __future__ import annotations
 
@@ -661,7 +660,6 @@ def serve(port: int = DEFAULT_PORT, root: Path = ROOT):
     server.controller = controller
     server.daemon_threads = True
     print(f'Fast-KV Dashboard: http://127.0.0.1:{port}', flush=True)
-    print('Local-only development dashboard; do not expose this port publicly.', flush=True)
     try:
         server.serve_forever(poll_interval=0.15)
     except KeyboardInterrupt:

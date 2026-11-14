@@ -19,3 +19,12 @@ build/
 
 # Local, private credentials from earlier security experiments
 security/
+
+# Fast-KV runtime data and release staging
+/cluster-data-backup-*/
+/fastkv_phase*/
+/fastkv_io_reactor_phase5/
+/fastkv_port7001_fix/
+/fastkv_remove_phase12/
+/fastkv_ttl_phase7/
+/fastkv_release/

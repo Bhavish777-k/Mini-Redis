@@ -163,6 +163,9 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .empty-state p { margin: 8px 0 0; max-width: 420px; color: #656565; font-size: 13px; line-height: 1.6; }
 
 /* Actions, forms and console */
+.configure-panel { margin-top: 30px; }
+.configure-panel #start-form { grid-template-columns: repeat(4,minmax(0,1fr)); }
+.configure-panel #start-form .form-actions, .configure-panel #start-form .form-note { grid-column: 1 / -1; }
 .bottom-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.07fr); gap: 16px; margin-top: 39px; }
 .panel { min-width: 0; padding: 25px; background: white; border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
 .panel-icon { width: 33px; height: 33px; display: grid; place-items: center; flex: none; border: 1px solid #dcdcdc; border-radius: 8px; background: #f6f6f6; color: #444; font-size: 17px; }
@@ -217,6 +220,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 @media (max-width: 520px) { .backup-controls, .backup-actions, .backup-restore { align-items: stretch; flex-direction: column; } .backup-controls .button, .backup-actions .button, .backup-restore .button { width: 100%; } }
 
 @media (max-width: 1190px) {
+  .configure-panel #start-form { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .sidebar { width: 220px; }
   .topbar { padding-inline: 25px; }
   .page-body { padding: 34px 25px; }
@@ -262,7 +266,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   .node-card, .panel { padding: 18px; }
   .node-header { flex-wrap: wrap; }
   .node-details { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
-  .settings-form, .resize-form, .key-form { grid-template-columns: 1fr; }
+  .settings-form, .resize-form, .key-form, .configure-panel #start-form { grid-template-columns: 1fr; }
   .form-actions { flex-wrap: wrap; }
   .form-actions .button { min-width: 120px; }
   .key-form #value-field { grid-column: 1; }

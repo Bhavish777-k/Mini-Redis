@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""Fast-KV command-line launcher; standard library only, macOS/Linux.
+
+Use the existing dashboard as the sole lifecycle owner of the cluster.
+This command deliberately does not touch cluster-data or backup archives.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import signal
+import socket
+import subprocess
+import sys
+import time
+from urllib import error, request
+import webbrowser
+
+ROOT = Path(__file__).resolve().parent.parent
+DASHBOARD = ROOT / 'dashboard'
+URL = 'http://127.0.0.1:8765'
+DEFAULTS = {'threshold': 60, 'capacity': 4096, 'max_nodes': 3, 'replicas': 1}
+NEW_CLUSTER = {'threshold': 60, 'capacity': 64 * 1024 * 1024, 'max_nodes': 3, 'replicas': 1}
+
+
+class LauncherError(Exception):
+    pass
+
+
+def api(path, payload=None, timeout=1.5):
+    headers = {'Host': '127.0.0.1:8765'}
+    if payload is not None:
+        session = api('/api/session', timeout=timeout)
+        token = session.get('csrf')
+        if not isinstance(token, str) or not token:
+            raise LauncherError('Dashboard did not provide a valid request token')
+        headers.update({'X-CSRF-Token': token, 'Origin': URL, 'Content-Type': 'application/json'})
+        data = json.dumps(payload).encode('utf-8')
+        method = 'POST'
+    else:
+        data, method = None, 'GET'
+    req = request.Request(URL + path, data=data, headers=headers, method=method)
+    try:
+        with request.urlopen(req, timeout=timeout) as response:
+            obj = json.load(response)
+    except error.HTTPError as exc:
+        try:
+            message = json.load(exc).get('error', f'HTTP {exc.code}')
+        except Exception:
+            message = f'HTTP {exc.code}'
+        raise LauncherError(message) from exc
+    except (OSError, ValueError, error.URLError) as exc:
+        raise LauncherError(f'Dashboard unavailable: {exc}') from exc
+    if not isinstance(obj, dict):
+        raise LauncherError('Unexpected dashboard response')
+    return obj
+
+
+def status_or_none():
+    try:
+        obj = api('/api/status', timeout=0.5)
+    except LauncherError:
+        return None
+    # Refuse to send management operations to arbitrary services on this port.
+    if (type(obj.get('online')) is not bool or
+        type(obj.get('node_count')) is not int or
+        not isinstance(obj.get('config'), dict) or
+        type(obj.get('owned')) is not bool):
+        raise LauncherError('Port 8765 is occupied by an incompatible dashboard')
+    return obj
+
+
+def port_listening(port):
+    try:
+        with socket.create_connection(('127.0.0.1', port), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
+def check_binaries():
+    files = [ROOT / 'build-debug' / 'cluster-manager', ROOT / 'build-debug' / 'fast-kv']
+    for path in files:
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise LauncherError('Fast-KV binaries not found. Run ./scripts/install_local.sh from the repository.')
+
+
+def ensure_dashboard():
+    state = status_or_none()
+    if state is not None:
+        return state
+    if port_listening(8765):
+        raise LauncherError('Port 8765 is occupied by another service. Inspect: lsof -nP -iTCP:8765 -sTCP:LISTEN')
+    log_path = DASHBOARD / '.launcher.log'
+    pid_path = DASHBOARD / '.launcher.pid'
+    DASHBOARD.mkdir(exist_ok=True)
+    with log_path.open('ab') as log:
+        process = subprocess.Popen([sys.executable, str(DASHBOARD / 'app.py')],
+                                   cwd=ROOT, stdin=subprocess.DEVNULL,
+                                   stdout=log, stderr=subprocess.STDOUT,
+                                   start_new_session=True, close_fds=True)
+    deadline = time.monotonic() + 7
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise LauncherError(f'Dashboard exited unexpectedly. See {log_path}')
+        state = status_or_none()
+        if state is not None:
+            pid_path.write_text(f'{process.pid}\n')
+            return state
+        time.sleep(0.1)
+    raise LauncherError(f'Dashboard did not start. See {log_path}')
+
+
+def requested_config(options, state):
+    saved = DASHBOARD / '.last_config.json'
+    if saved.is_file():
+        try:
+            candidate = json.loads(saved.read_text())
+            if all(type(candidate.get(k)) is int for k in DEFAULTS):
+                config = {k: candidate[k] for k in DEFAULTS}
+            else:
+                config = dict(DEFAULTS)
+        except (OSError, ValueError):
+            config = dict(DEFAULTS)
+    elif (ROOT / 'cluster-data').exists():
+        # Never silently replace configuration on an existing database.
+        config = dict(DEFAULTS)
+    else:
+        config = dict(NEW_CLUSTER)
+    if options.capacity_mb is not None:
+        config['capacity'] = options.capacity_mb * 1024 * 1024
+    if options.capacity_bytes is not None:
+        config['capacity'] = options.capacity_bytes
+    for arg, key in [('threshold', 'threshold'), ('max_nodes', 'max_nodes'), ('replicas', 'replicas')]:
+        val = getattr(options, arg)
+        if val is not None:
+            config[key] = val
+    ranges = [('threshold', 1, 99), ('capacity', 256, 1_073_741_824),
+              ('max_nodes', 1, 32), ('replicas', 0, 1)]
+    for field, lo, hi in ranges:
+        if type(config[field]) is not int or not lo <= config[field] <= hi:
+            raise LauncherError(f'Invalid {field}; expected an integer between {lo} and {hi}')
+    return config
+
+
+def run_start(args):
+    check_binaries()
+    state = ensure_dashboard()
+    if state['online']:
+        print('Fast-KV is already running on 127.0.0.1:7001')
+        return 0
+    if port_listening(7001):
+        raise LauncherError('Port 7001 is occupied; stop the existing cluster/service before starting.')
+    config = requested_config(args, state)
+    result = api('/api/start', config, timeout=12)
+    if not result.get('ok'):
+        raise LauncherError(result.get('error', 'Unable to start cluster'))
+    print('Fast-KV started — router: 127.0.0.1:7001')
+    print('Dashboard: ' + URL)
+    print(f"Settings: {config['capacity']:,} bytes/node, threshold {config['threshold']}%, "
+          f"max nodes {config['max_nodes']}, replicas {'on' if config['replicas'] else 'off'}")
+    return 0
+
+
+def run_stop(_args):
+    state = status_or_none()
+    if state is None or not state['online']:
+        print('Fast-KV is already stopped.')
+        return 0
+    if not state['owned']:
+        raise LauncherError('Cluster is managed externally; stop it from the process that started it.')
+    result = api('/api/stop', {}, timeout=9)
+    if not result.get('ok'):
+        raise LauncherError(result.get('error', 'Unable to stop cluster'))
+    print('Fast-KV cluster stopped. Dashboard remains available at ' + URL)
+    return 0
+
+
+def run_status(args):
+    state = status_or_none()
+    if state is None:
+        print(json.dumps({'dashboard': 'offline', 'router': 'unknown'}) if args.json else
+              'Dashboard offline. Run: fastkv start')
+        return 0
+    if args.json:
+        print(json.dumps(state, indent=2))
+        return 0
+    if not state['online']:
+        print('Cluster stopped. Dashboard: ' + URL)
+        return 0
+    print('Cluster running — router: 127.0.0.1:7001')
+    print(f"Nodes: {state['node_count']} / {state['max_nodes']} (max)")
+    if 'total_used' in state:
+        print(f"Memory: {state['total_used']:,} / {state['total_capacity']:,} bytes")
+    print('Dashboard: ' + URL)
+    return 0
+
+
+def run_dashboard(args):
+    ensure_dashboard()
+    print('Developer dashboard: ' + URL)
+    if not args.no_open:
+        webbrowser.open(URL)
+    return 0
+
+
+def run_logs(args):
+    file = DASHBOARD / ('.launcher.log' if args.dashboard else '.manager.log')
+    if not file.is_file():
+        print('No log file yet: ' + str(file))
+        return 0
+    # Bounded read to avoid loading potentially huge logs into memory.
+    with file.open('rb') as handle:
+        handle.seek(0, os.SEEK_END)
+        handle.seek(max(0, handle.tell() - 262144))
+        lines = handle.read().decode('utf-8', errors='replace').splitlines()
+    for line in lines[-args.lines:]:
+        print(line)
+    return 0
+
+
+def run_shutdown(_args):
+    state = status_or_none()
+    if state is None:
+        print('Dashboard already stopped.')
+        return 0
+    if state['online']:
+        run_stop(None)
+    file = DASHBOARD / '.launcher.pid'
+    try:
+        pid = int(file.read_text().strip())
+    except (OSError, ValueError):
+        print('Dashboard was started externally. Close its Terminal to stop it.')
+        return 0
+    # Validate process identity before sending a signal; never trust a stale PID.
+    result = subprocess.run(['ps', '-p', str(pid), '-o', 'command='],
+                            capture_output=True, text=True, check=False)
+    command = result.stdout.strip()
+    if not command or str(DASHBOARD / 'app.py') not in command:
+        raise LauncherError('Dashboard PID file is stale; refusing to signal an unrelated process')
+    os.kill(pid, signal.SIGTERM)
+    file.unlink(missing_ok=True)
+    print('Fast-KV dashboard stopped.')
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog='fastkv', description='Fast-KV cache and dashboard launcher')
+    parser.add_argument('--version', action='version', version='Fast-KV 0.1.0')
+    commands = parser.add_subparsers(dest='command', required=True)
+    start = commands.add_parser('start', help='Start cache and dashboard (remember previous settings)')
+    capacity = start.add_mutually_exclusive_group()
+    capacity.add_argument('--capacity-mb', type=int, help='Capacity per primary/replica in MiB')
+    capacity.add_argument('--capacity-bytes', type=int, help='Capacity per primary/replica in bytes')
+    start.add_argument('--threshold', type=int, help='Autoscale threshold (1-99 percent)')
+    start.add_argument('--max-nodes', type=int, help='Maximum primary nodes (1-32)')
+    start.add_argument('--replicas', type=int, choices=(0, 1), help='One replica per primary (1), or none (0)')
+    commands.add_parser('stop', help='Stop cluster gracefully; leave dashboard running')
+    status = commands.add_parser('status', help='Show cluster health and node summary')
+    status.add_argument('--json', action='store_true')
+    dashboard = commands.add_parser('dashboard', help='Open local web dashboard')
+    dashboard.add_argument('--no-open', action='store_true', help='Only print URL')
+    logs = commands.add_parser('logs', help='Show recent cluster/dashboard logs')
+    logs.add_argument('-n', '--lines', type=int, default=40)
+    logs.add_argument('--dashboard', action='store_true', help='Display dashboard startup logs')
+    commands.add_parser('shutdown', help='Stop cluster and launcher-owned dashboard')
+    args = parser.parse_args(argv)
+    try:
+        if args.command == 'start': return run_start(args)
+        if args.command == 'stop': return run_stop(args)
+        if args.command == 'status': return run_status(args)
+        if args.command == 'dashboard': return run_dashboard(args)
+        if args.command == 'logs':
+            if not 1 <= args.lines <= 2000: raise LauncherError('lines must be 1..2000')
+            return run_logs(args)
+        if args.command == 'shutdown': return run_shutdown(args)
+    except (LauncherError, OSError) as exc:
+        print('Fast-KV: ' + str(exc), file=sys.stderr)
+        return 1
+    return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

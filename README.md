@@ -1,264 +1,154 @@
-# Fast-KV: Concurrent In-Memory Key-Value Server
+# Fast-KV
 
-## 1. About the Project
+**Distributed in-memory caching engine in modern C++.**
 
-Fast-KV is a C++ key-value server inspired by Redis. It stores data in memory and allows clients to access and modify it through a TCP connection.
+Fast-KV provides fast key-value access, expiration policies, bounded memory usage, automatic cluster scale-out, replica failover, and persistence through a single router endpoint. It includes a browser-based control plane and SDKs for Python and Node.js.
 
-The main goal of this project is to understand operating system concepts and build a fast, concurrent server.
+## Highlights
 
-## 2. Features
+| Capability | What it provides |
+| --- | --- |
+| In-memory cache | `SET`, `GET`, `DEL`, `EXISTS`, `INCR` and other key-value operations |
+| Key expiration | Per-key TTL, database-wide default lifetime, and permanent keys |
+| Bounded memory | Configurable node capacities, custom slab allocator and LRU eviction |
+| Scale-out | Adds storage nodes when configurable utilization thresholds are crossed |
+| Replication & failover | Primary/replica topology with automatic promotion during tested primary failures |
+| Persistence | Append-only storage and restart recovery |
+| Developer experience | One-command startup, terminal CLI, Python and Node.js SDKs |
+| Control plane | Node health, live request metrics, cluster settings, key browser, and backup/restore |
 
-- Store and retrieve key-value pairs
-- Support multiple client connections
-- Use a thread pool to process client requests
-- Protect shared data using mutexes and reader-writer locks
-- Support commands such as SET, GET, DEL, EXISTS, and INCR
-- Save data to an append-only log file
-- Recover stored data after restarting the server
-- Manage memory usage with an LRU eviction policy
-- Measure request throughput and response latency
-- Demonstrate process management, race conditions, and deadlocks
+## Architecture
 
-## 3. Technologies Used
+```mermaid
+flowchart TD
+    APP[Application / Python / Node.js] --> ROUTER[Fast-KV Router :7001]
+    ROUTER --> P1[Primary node 1]
+    ROUTER --> P2[Primary node 2]
+    ROUTER --> PN[Additional primaries as capacity grows]
+    P1 --> R1[Replica 1]
+    P2 --> R2[Replica 2]
+    PN --> RN[Replica N]
+    WEB[Dashboard :8765] --> MANAGER[Cluster Manager]
+    MANAGER --> ROUTER
+    MANAGER --> P1
+    MANAGER --> P2
+```
 
-- C++20
-- CMake
-- POSIX (BSD) sockets for TCP networking on Linux
-- Standard C++ threading library
-- `std::unordered_map` for key-value storage
-- `std::shared_mutex` for synchronization
-- File handling for persistence
-- CTest for running tests
+The router provides a stable endpoint while the cluster manager supervises storage nodes, scaling decisions, and primary recovery.
 
-## 4. Project Structure
+## Quick start
+
+**Requirements:** macOS or Linux, CMake 3.20+, a C++20 compiler, and Python 3.9+.
+
+```bash
+# From the repository root
+bash scripts/install_local.sh
+~/.local/bin/fastkv start
+~/.local/bin/fastkv status
+```
+
+Open the dashboard with `~/.local/bin/fastkv dashboard`, or visit `http://127.0.0.1:8765`.
+
+The standard router endpoint is `127.0.0.1:7001`. To choose cache capacity and scale-out settings:
+
+```bash
+~/.local/bin/fastkv start --capacity-mb 128 --max-nodes 3 --threshold 70 --replicas 1
+```
+
+For shutdown:
+
+```bash
+~/.local/bin/fastkv stop
+~/.local/bin/fastkv shutdown
+```
+
+## Python example
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --no-cache-dir ./sdk/python
+```
+
+```python
+from fastkv import FastKV
+
+cache = FastKV(port=7001)
+cache.set("session:42", "active", ttl=1800)
+print(cache.get("session:42"))
+
+cache.set("page:views", 0)
+cache.incr("page:views")
+print(cache.get("page:views"))
+```
+
+## Node.js example
+
+From the repository root:
+
+```js
+const { FastKV } = require('./sdk/node');
+
+async function main() {
+  const cache = new FastKV();
+  await cache.set('product:42', 'cached', { ttl: 300 });
+  console.log(await cache.get('product:42'));
+}
+main().catch(console.error);
+```
+
+## Dashboard
+
+The dashboard groups the main workflows in this order:
+
+1. **Cluster Overview & Monitoring** — throughput, latency, and node health.
+2. **Cluster Control** — start/stop, node memory, autoscaling thresholds, replication, and default TTL.
+3. **Key Browser** — find, create, update, expire, and delete keys.
+4. **Key Console & Events** — execute commands and inspect manager events.
+5. **Backups** — create, verify, and restore offline archives.
+
+## Test suite
+
+```bash
+cmake -S . -B build-debug
+cmake --build build-debug -j4
+ctest --test-dir build-debug --output-on-failure
+```
+
+Integration checks for features live under `tests/`. To verify launcher behavior, stop the active cluster first and run:
+
+```bash
+python3 tests/test_easy_install.py ./build-debug/cluster-manager ./build-debug/fast-kv
+```
+
+For Python SDK tests:
+
+```bash
+python3 tests/test_sdk_phase8.py
+```
+
+For the Node.js SDK:
+
+```bash
+(cd sdk/node && npm test)
+```
+
+## Project layout
 
 ```text
-mini_redis/
-├── CMakeLists.txt
-├── README.md
-├── include/
-├── src/
-├── tests/
-├── benchmarks/
-├── demos/
-└── data/
-    └── appendonly.log   (created automatically when the server runs)
+bin/              Fast-KV launcher
+cluster/          Cluster manager and router
+src/, include/    C++ engine, protocol, memory, and persistence
+sdk/python/       Python SDK and CLI
+sdk/node/         Node.js SDK
+dashboard/        Web dashboard and backup operations
+tests/            Unit and integration tests
+benchmarks/       Benchmark tooling and recorded results
+docs/             Installation and technical guides
 ```
 
-## 5. Running the Project on Linux (Step by Step)
+## Compatibility & deployment
 
-These steps were tested on Ubuntu 24.04 (GCC 13, CMake 3.28). They also work on Debian, Linux Mint, WSL2 and similar. Every command is typed in the Linux terminal.
+Fast-KV uses its own line-based protocol, with whitespace-free keys and values; it is not wire-compatible with Redis RESP clients. The default setup uses loopback networking and does not include authentication or TLS. Use trusted environments and appropriate network isolation for deployment. Backup/restore operations are offline, and automatic scale-in is not implemented.
 
-### Step 1: Install the required tools
-
-Ubuntu / Debian / Mint:
-
-```bash
-sudo apt update
-sudo apt install -y build-essential cmake netcat-openbsd unzip
-```
-
-Fedora:
-
-```bash
-sudo dnf install -y gcc-c++ cmake make nmap-ncat unzip
-```
-
-Arch:
-
-```bash
-sudo pacman -S --needed base-devel cmake openbsd-netcat unzip
-```
-
-`build-essential` provides `g++` and `make`. A C++20 compiler (GCC 10 or newer, or Clang 12 or newer) and CMake 3.20 or newer are required. `netcat` is only used to talk to the server by hand.
-
-### Step 2: Check the installed versions
-
-```bash
-g++ --version
-cmake --version
-```
-
-### Step 3: Get the project and open it in the terminal
-
-If you have the project as a zip file:
-
-```bash
-unzip mini_redis.zip
-cd mini_redis
-```
-
-Check that you are in the right folder. You should see `CMakeLists.txt`:
-
-```bash
-ls
-```
-
-### Step 4: Configure and build
-
-```bash
-cmake -S . -B build
-cmake --build build -j"$(nproc)"
-```
-
-The build type defaults to `Release` (optimized). The binaries are placed in the `build/` folder:
-
-```text
-build/fast-kv            the server
-build/benchmark_client   the benchmark client
-build/process_demo       process management demo
-build/race_demo          race condition demo
-build/deadlock_demo      deadlock demo
-build/test_*             unit tests
-```
-
-### Step 5: Run the unit tests
-
-```bash
-ctest --test-dir build --output-on-failure
-```
-
-All 5 tests (Protocol, KVStore, Concurrency, Persistence, Eviction) should show `Passed`.
-
-### Step 6: Start the server (Terminal 1)
-
-```bash
-./build/fast-kv
-```
-
-You should see:
-
-```text
-Starting Fast-KV server...
-Workers: 4
-Press Ctrl+C to stop.
-Server listening on port 6379
-```
-
-Leave this terminal open. The server listens on TCP port **6379**. Run it from the project root folder, because data is saved to `data/appendonly.log` relative to the current directory.
-
-If you already have a real Redis running on port 6379, stop it first (`sudo systemctl stop redis-server`) or the bind will fail.
-
-### Step 7: Send commands to the server (Terminal 2)
-
-Open a second terminal and connect with netcat:
-
-```bash
-nc 127.0.0.1 6379
-```
-
-Now type commands, one per line, and press Enter:
-
-```text
-SET name alice
-GET name
-EXISTS name
-INCR counter
-INCR counter
-DEL name
-GET name
-```
-
-Expected replies: `OK`, `alice`, `1`, `1`, `2`, `1`, `(nil)`. Press `Ctrl+C` to leave netcat.
-
-You can also send a single command without an interactive session:
-
-```bash
-echo "SET city pune" | nc -q1 127.0.0.1 6379
-echo "GET city"      | nc -q1 127.0.0.1 6379
-```
-
-(On some distributions the flag is `-N` instead of `-q1`.)
-
-### Step 8: Check persistence and recovery
-
-1. In Terminal 1, press `Ctrl+C` to stop the server. It prints `Server stopped.`
-2. Look at the saved log:
-
-   ```bash
-   cat data/appendonly.log
-   ```
-
-3. Start the server again with `./build/fast-kv`, then run `echo "GET counter" | nc -q1 127.0.0.1 6379`. The value from before the restart is returned.
-
-To start with an empty database, delete the log: `rm -f data/appendonly.log`.
-
-### Step 9: Run the benchmark
-
-With the server running in Terminal 1, run in Terminal 2:
-
-```bash
-./build/benchmark_client 10000
-```
-
-The argument is the number of requests (default 10000). It prints requests per second and average latency.
-
-### Step 10: Run the OS demos
-
-```bash
-./build/process_demo     # fork() + exec + waitpid()
-./build/race_demo        # data race without a lock vs. with a mutex
-./build/deadlock_demo    # two threads locking in opposite order
-```
-
-### Rebuilding from scratch
-
-```bash
-rm -rf build
-cmake -S . -B build
-cmake --build build -j"$(nproc)"
-```
-
-To build with debug symbols instead: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug`.
-
-### Troubleshooting
-
-| Problem | Fix |
-|---|---|
-| `cmake: command not found` | Install it: `sudo apt install cmake` |
-| `g++: command not found` | `sudo apt install build-essential` |
-| `Bind failed: Address already in use` | Another program uses port 6379. Find it with `ss -ltnp \| grep 6379` and stop it. |
-| `Could not open persistence file` | Run the server from the project folder, and make sure you can write to it. |
-| `nc: command not found` | `sudo apt install netcat-openbsd` |
-| `Could not connect to Fast-KV` (benchmark) | Start the server first (Step 6). |
-| Compiler too old (C++20 errors) | Use GCC 10+ / Clang 12+. On Ubuntu 20.04: `sudo apt install g++-10` and add `-DCMAKE_CXX_COMPILER=g++-10` to the cmake configure command. |
-
-## 6. Changes Made for Linux
-
-The project was originally written for Windows. It was ported as follows:
-
-- **Networking** (`server.h`, `server.cpp`, `event_loop.h`, `event_loop.cpp`, `benchmark_client.cpp`): Winsock2 (`WSAStartup`, `SOCKET`, `closesocket`, `WSAGetLastError`) was replaced with POSIX sockets (`<sys/socket.h>`, `int` file descriptors, `close`, `errno`).
-- **Event loop**: `select()` now receives the highest file descriptor + 1 and a rebuilt `fd_set`, as Linux requires (Windows ignores that argument and exposes `fd_array`).
-- **Process demo** (`process_demo.cpp`): `CreateProcess` / `WaitForSingleObject` was replaced with `fork` / `exec` / `waitpid`.
-- **SIGPIPE**: sending to a disconnected client would kill the process on Linux, so `send()` uses `MSG_NOSIGNAL` and `SIGPIPE` is ignored.
-- **Clean shutdown**: `Ctrl+C` (SIGINT) and SIGTERM now stop the server. A watcher thread calls `Server::stop()`, which wakes up `accept()` and any idle client connections so the thread pool can exit.
-- **Restarting quickly**: `SO_REUSEADDR` is set on the listening socket.
-- **Build** (`CMakeLists.txt`): removed `ws2_32` and MSVC options, defaults to a Release build, and added the missing `protocol.cpp` to `test_persistence`.
-- **Other fixes**: removed a stray Markdown code fence from `server.h`, added a missing `std::` in `test_eviction.cpp`, and converted Windows (CRLF) line endings to Linux (LF).
-
-## 7. Performance Testing
-
-The benchmark client will be used to measure:
-
-- Requests processed per second
-- Average response time
-- p50, p95, and p99 latency
-- CPU and memory usage
-- Behavior under multiple concurrent clients
-
-Performance comparisons should use the same commands, data sizes, client counts, and persistence settings.
-
-## 8. Project Development Plan
-
-1. Create the basic TCP server.
-2. Implement command parsing and key-value storage.
-3. Add SET, GET, DEL, EXISTS, and INCR.
-4. Add a thread pool and thread-safe operations.
-5. Add persistence and recovery.
-6. Implement memory limits and LRU eviction.
-7. Improve networking and concurrent request handling.
-8. Add tests, benchmarks, and operating-system demonstrations.
-
-## 9. Important Note
-
-This is an educational Redis-inspired server. It is not initially a drop-in replacement for Redis. Production use requires additional work on protocol compatibility, persistence guarantees, failure recovery, security, and performance testing.
+For configuration details, see [Installation and quick start](docs/easy_install.md).

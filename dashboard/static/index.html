@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light" />
+  <title>Fast-KV | Cluster Dashboard</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-logo" aria-hidden="true"><svg viewBox="0 0 48 48" fill="none"><rect x="5" y="7" width="38" height="34" rx="10" stroke="currentColor" stroke-width="2"/><path d="M15 18h18M15 25h13M15 32h9" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/><circle cx="34" cy="32" r="4" fill="currentColor"/></svg></span>
+        <span><strong>fast<span class="brand-accent">kv</span></strong><small>CONTROL PLANE</small></span>
+      </div>
+      <div class="sidebar-kicker">WORKSPACE</div>
+      <nav class="mainnav" aria-label="Main navigation">
+        <a href="#overview" class="nav-item selected" data-nav="overview"><span class="nav-symbol">◈</span> Overview</a>
+        <a href="#telemetry" class="nav-item" data-nav="telemetry"><span class="nav-symbol">▥</span> Monitoring</a>
+        <a href="#nodes" class="nav-item" data-nav="nodes"><span class="nav-symbol">▦</span> Cluster Nodes</a>
+        <a href="#configure" class="nav-item" data-nav="configure"><span class="nav-symbol">⚙</span> Configuration</a>
+        <a href="#console" class="nav-item" data-nav="console"><span class="nav-symbol">⌘</span> Key Console</a>
+        <a href="#logs" class="nav-item" data-nav="logs"><span class="nav-symbol">≡</span> Events & Logs</a>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="mode-dot-line"><span class="mode-dot"></span> LOCAL DEVELOPMENT</div>
+        <p>Connected through<br><strong>127.0.0.1:7001</strong></p>
+        <div class="sidebar-divider"></div>
+        <p class="micro">FAST-KV ENGINE <span>v0.6 prototype</span></p>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div class="breadcrumbs">Workspace <span>/</span> <strong>Cluster Overview</strong></div>
+        <div class="header-actions"><span class="last-updated" id="last-updated">Not connected</span><span class="connection" id="connection"><span class="connection-dot"></span><span id="connection-label">Offline</span></span></div>
+      </header>
+      <div class="page-body">
+        <section id="overview" class="intro-section">
+          <div class="eyebrow"><span class="tiny-square"></span> DISTRIBUTED KEY–VALUE INFRASTRUCTURE</div>
+          <div class="intro-layout">
+            <div><h1>Cluster <em>overview.</em></h1><p class="intro-subtitle">Monitor node health, manage capacity, and work with your keys in one place.</p></div>
+            <div class="intro-buttons"><button id="refresh-btn" class="button button-muted" type="button">↻ &nbsp; Refresh</button><button id="scroll-config" class="button button-primary" type="button">＋ &nbsp; Configure cluster</button></div>
+          </div>
+        </section>
+
+        <section class="metric-grid" aria-label="Cluster statistics">
+          <article class="metric-card"><div class="metric-top">ACTIVE SHARDS <span class="metric-icon">▦</span></div><div class="metric-value" id="metric-nodes">—</div><div class="metric-bottom" id="metric-node-sub">Waiting for cluster</div></article>
+          <article class="metric-card"><div class="metric-top">DATA UTILIZATION <span class="metric-icon">◉</span></div><div class="metric-value" id="metric-usage">—</div><div class="metric-bottom" id="metric-usage-sub">Allocated node capacity</div></article>
+          <article class="metric-card"><div class="metric-top">FAILOVER EVENTS <span class="metric-icon">⤴</span></div><div class="metric-value" id="metric-failover">—</div><div class="metric-bottom">Automatic primary promotions</div></article>
+          <article class="metric-card"><div class="metric-top">RESTARTS <span class="metric-icon">↻</span></div><div class="metric-value" id="metric-restarts">—</div><div class="metric-bottom">Supervised process recovery</div></article>
+        </section>
+
+        <section class="telemetry-panel" id="telemetry" aria-labelledby="telemetry-title">
+          <div class="telemetry-heading"><div><div class="section-kicker">LIVE / ROUTER METRICS</div><h2 id="telemetry-title">Request performance</h2></div><span class="telemetry-note" id="telemetry-note">Since manager start · most recent 10 seconds</span></div>
+          <div class="telemetry-grid">
+            <div><div class="telemetry-label">REQUESTS / SEC</div><div class="telemetry-value" id="metric-rps">—</div><div class="telemetry-sub" id="metric-requests">No samples</div></div>
+            <div><div class="telemetry-label">GET AVG LATENCY</div><div class="telemetry-value" id="metric-get">—</div><div class="telemetry-sub" id="metric-get-count">0 GET calls</div></div>
+            <div><div class="telemetry-label">SET AVG LATENCY</div><div class="telemetry-value" id="metric-set">—</div><div class="telemetry-sub" id="metric-set-count">0 SET calls</div></div>
+            <div><div class="telemetry-label">RECENT ERRORS</div><div class="telemetry-value" id="metric-errors">—</div><div class="telemetry-sub" id="metric-error-count">Last 10 seconds</div></div>
+          </div>
+          <div class="sparkline-area"><div class="sparkline-heading"><span>LIVE THROUGHPUT</span><span id="metric-p95">P95 bound: —</span></div><div class="sparkline" id="metric-sparkline" role="img" aria-label="Recent request throughput history"></div><p class="sparkline-caption">Recent samples from this browser; monitoring traffic excluded. Latencies are measured inside the router.</p></div>
+        </section>
+
+        <section class="section-block" id="nodes">
+          <div class="section-title-row"><div><div class="section-kicker">01 / CLUSTER TOPOLOGY</div><h2>Node health <span class="count-pill" id="node-count-pill">0 NODES</span></h2></div><div class="legend"><span><i class="dot healthy"></i>Healthy</span><span><i class="dot warning"></i>Degraded</span></div></div>
+          <div id="node-cards" class="node-grid"><div class="empty-state"><div class="empty-symbol">◇</div><strong>No active cluster</strong><p>Start a cluster below or connect to an existing manager on port 7001.</p></div></div>
+        </section>
+
+        <div class="bottom-grid">
+          <section id="configure" class="panel configure-panel">
+            <div class="panel-heading"><div><div class="section-kicker">02 / MANAGE</div><h2>Cluster controls</h2></div><span class="panel-icon">⚙</span></div>
+            <p class="panel-description">Choose memory and scaling limits. Fast-KV manages capacity within your settings.</p>
+            <form id="start-form" class="settings-form">
+              <label class="form-field">Node capacity <span>bytes per node</span><input type="number" name="capacity" min="256" max="1073741824" required value="4096" /></label>
+              <label class="form-field">Maximum nodes <span>hard limit</span><input type="number" name="max_nodes" min="1" max="32" required value="3" /></label>
+              <label class="form-field">Scale-out threshold <span>percent</span><div class="input-suffix"><input type="number" name="threshold" min="1" max="99" required value="60" /><span>%</span></div></label>
+              <label class="form-field">Replicas <span>per shard</span><select name="replicas"><option value="1" selected>1 — High availability</option><option value="0">0 — No replica</option></select></label>
+              <div class="form-actions"><button type="submit" id="start-btn" class="button button-primary">▶ &nbsp; Start cluster</button><button type="button" id="stop-btn" class="button button-danger" disabled>■ &nbsp; Stop</button></div>
+              <p class="form-note" id="control-note">Settings apply when starting a new manager. Existing clusters retain their startup limits.</p>
+            </form>
+            <div class="inner-separator"></div>
+            <h3>Increase node memory</h3>
+            <p class="panel-description compact">Raise an active shard's capacity live. Existing values stay on that node.</p>
+            <form id="resize-form" class="resize-form"><label class="form-field">Node<select id="resize-node" name="port" required><option value="">Select a node</option></select></label><label class="form-field">New capacity (bytes)<input id="resize-capacity" name="capacity" type="number" min="1" max="1073741824" required placeholder="8192" /></label><button class="button button-outline" id="resize-btn" disabled type="submit">Apply resize</button></form>
+          </section>
+
+          <div class="right-stack">
+            <section id="console" class="panel console-panel"><div class="panel-heading"><div><div class="section-kicker">03 / INTERACT</div><h2>Key console</h2></div><span class="panel-icon">⌘</span></div><p class="panel-description">Read and write keys through the live Fast-KV router. Use single-word keys and values.</p>
+              <form id="key-form" class="key-form"><label class="form-field">Command<select id="key-action" name="action"><option>SET</option><option>GET</option><option>WHERE</option><option>INCR</option><option>DEL</option></select></label><label class="form-field">Key<input name="key" maxlength="120" placeholder="city" required autocomplete="off" /></label><label class="form-field" id="value-field">Value<input name="value" maxlength="2048" placeholder="gandhinagar" autocomplete="off" /></label><button id="run-command" class="button button-primary" type="submit">Run command <span>↗</span></button></form>
+              <div class="console-output"><div class="console-output-header"><span class="terminal-dot"></span> COMMAND OUTPUT</div><code id="command-output">&gt; Awaiting command...</code></div>
+            </section>
+            <section id="logs" class="panel events-panel"><div class="panel-heading"><div><div class="section-kicker">04 / ACTIVITY</div><h2>Recent events</h2></div><button id="logs-btn" class="button button-text" type="button">Manager logs ↗</button></div><div class="event-feed" id="event-feed"><p class="muted">No events yet.</p></div><pre class="log-output hidden" id="log-output"></pre></section>
+          </div>
+        </div>
+        <footer class="footer"><span><strong>fast<span class="brand-accent">kv</span></strong> / Developer control plane</span><span>Local machine only · Not for public exposure</span></footer>
+      </div>
+    </main>
+  </div>
+  <div class="toast-region" id="toast-region" role="status" aria-live="polite"></div>
+</body>
+</html>

@@ -16,3 +16,6 @@ __pycache__/
 *.egg-info/
 build/
 .venv/
+
+# Local, private credentials from earlier security experiments
+security/

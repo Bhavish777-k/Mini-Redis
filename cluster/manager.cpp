@@ -1,4 +1,7 @@
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <iomanip>
 #include <cctype>
 #include <cstdlib>
 #include <map>
@@ -916,10 +919,104 @@ void makeNonblocking(int fd) {
         throw std::runtime_error("cannot configure socket");
 }
 
+// Phase 9 — bounded in-memory router telemetry. This is deliberately collected
+// where a client request is handled, not by probing each node. Router traffic
+// from dashboard health checks is excluded so idle clusters report 0 req/s.
+class RouterMetrics {
+    using Clock = std::chrono::steady_clock;
+    struct Window { std::int64_t second = -1; Bytes count = 0, errors = 0; };
+    std::array<Window, 10> window_{};
+    static constexpr std::array<Bytes, 13> latencyBoundsUs_{100, 250, 500, 1000,
+        2500, 5000, 10000, 25000, 50000, 100000, 250000, 500000, 1000000};
+    std::array<Bytes, latencyBoundsUs_.size() + 1> histogram_{};
+    Clock::time_point started_ = Clock::now();
+    Bytes requests_ = 0, successes_ = 0, errors_ = 0, totalLatencyUs_ = 0;
+    Bytes gets_ = 0, sets_ = 0, getLatencyUs_ = 0, setLatencyUs_ = 0;
+
+    static std::int64_t second() {
+        return std::chrono::duration_cast<std::chrono::seconds>(
+            Clock::now().time_since_epoch()).count();
+    }
+    static bool monitorOnly(const std::string& op) {
+        return op == "METRICS" || op == "PING" || op == "COUNT" ||
+               op == "CLUSTER" || op == "OSSTATS" || op == "ALLOCSTATS";
+    }
+public:
+    void record(const std::string& request, const std::string& reply, Clock::duration latency) {
+        std::istringstream in(request);
+        std::string op;
+        in >> op;
+        for (char& ch : op) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        if (monitorOnly(op)) return;
+        Bytes elapsedUs = static_cast<Bytes>(std::max<std::int64_t>(0,
+            std::chrono::duration_cast<std::chrono::microseconds>(latency).count()));
+        const bool error = reply.rfind("ERR", 0) == 0;
+        ++requests_;
+        if (error) ++errors_; else ++successes_;
+        totalLatencyUs_ += elapsedUs;
+        if (op == "GET") { ++gets_; getLatencyUs_ += elapsedUs; }
+        if (op == "SET") { ++sets_; setLatencyUs_ += elapsedUs; }
+        std::size_t bin = 0;
+        while (bin < latencyBoundsUs_.size() && elapsedUs > latencyBoundsUs_[bin]) ++bin;
+        ++histogram_[bin];
+        const auto now = second();
+        auto& bucket = window_[static_cast<std::size_t>(now % window_.size())];
+        if (bucket.second != now) bucket = {now, 0, 0};
+        ++bucket.count;
+        if (error) ++bucket.errors;
+    }
+
+    std::string snapshot() const {
+        Bytes recent = 0, recentErrors = 0;
+        const auto now = second();
+        for (const auto& bucket : window_) {
+            if (bucket.second <= now && now - bucket.second < 10) {
+                recent += bucket.count;
+                recentErrors += bucket.errors;
+            }
+        }
+        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            Clock::now() - started_).count();
+        // Exact ten-second moving window when established; short uptime uses
+        // its elapsed duration (at least one second to avoid rate spikes).
+        const double seconds = std::min(10.0, std::max(1.0, elapsedMs / 1000.0));
+        Bytes p95Bound = 0;
+        if (requests_) {
+            const Bytes rank = (requests_ * 95 + 99) / 100;
+            Bytes observed = 0;
+            for (std::size_t i = 0; i < histogram_.size(); ++i) {
+                observed += histogram_[i];
+                if (observed >= rank) {
+                    p95Bound = i == latencyBoundsUs_.size() ? 0 : latencyBoundsUs_[i];
+                    break;
+                }
+            }
+        }
+        std::ostringstream result;
+        result << std::fixed << std::setprecision(2)
+               << "uptime_s=" << elapsedMs / 1000
+               << " requests_total=" << requests_
+               << " requests_ok=" << successes_
+               << " requests_err=" << errors_
+               << " rps_10s=" << recent / seconds
+               << " recent_requests=" << recent
+               << " recent_errors=" << recentErrors
+               << " error_rate_10s_pct=" << (recent ? 100.0 * recentErrors / recent : 0.0)
+               << " avg_us=" << (requests_ ? static_cast<double>(totalLatencyUs_) / requests_ : 0.0)
+               << " p95_us_le=" << p95Bound
+               << " get_count=" << gets_
+               << " get_avg_us=" << (gets_ ? static_cast<double>(getLatencyUs_) / gets_ : 0.0)
+               << " set_count=" << sets_
+               << " set_avg_us=" << (sets_ ? static_cast<double>(setLatencyUs_) / sets_ : 0.0);
+        return result.str();
+    }
+};
+
 struct Client { std::string input, output; std::size_t sent = 0; bool closing = false; };
 class Router {
     FD listener{socket(AF_INET, SOCK_STREAM, 0)};
     std::map<int, Client> clients;
+    RouterMetrics metrics;
 public:
     Router() {
         int one = 1;
@@ -943,8 +1040,22 @@ public:
                     c.output = "ERR request too large\n";
                     c.closing = true;
                 } else if (end != std::string::npos) {
-                    try { c.output = route(c.input.substr(0,end), cluster); }
-                    catch (const std::exception& e) { c.output = "ERR " + std::string(e.what()); }
+                    const std::string request = c.input.substr(0, end);
+                    std::istringstream parsed(request);
+                    std::string operation, extra;
+                    parsed >> operation;
+                    for (char& ch : operation)
+                        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+                    const bool isMetrics = operation == "METRICS";
+                    const auto before = std::chrono::steady_clock::now();
+                    try {
+                        if (isMetrics) {
+                            c.output = (parsed >> extra) ? "ERR METRICS takes no arguments" : metrics.snapshot();
+                        } else c.output = route(request, cluster);
+                    } catch (const std::exception& e) {
+                        c.output = "ERR " + std::string(e.what());
+                    }
+                    if (!isMetrics) metrics.record(request, c.output, std::chrono::steady_clock::now() - before);
                     c.output += '\n';
                     c.input.erase(0,end + 1);
                 }

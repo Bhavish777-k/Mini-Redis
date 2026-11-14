@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cctype>
 #include <map>
+#include <set>
 #include <memory>
 #include <poll.h>
 #include <sstream>
@@ -162,6 +163,61 @@ void start(Node& node, const fs::path& binary, const fs::path& dir, Bytes capaci
 }
 constexpr int firstPort = 6381;
 constexpr unsigned maxLocalNodes = 32;
+constexpr int firstReplicaPort = 7381;
+
+fs::path nodeDir(int port) {
+    if (port >= firstPort && port < firstPort + static_cast<int>(maxLocalNodes))
+        return fs::path("cluster-data") / ("node-" + std::to_string(port - firstPort + 1));
+    if (port >= firstReplicaPort && port < firstReplicaPort + static_cast<int>(maxLocalNodes))
+        return fs::path("cluster-data") / ("replica-" + std::to_string(port - firstReplicaPort + 1));
+    throw std::runtime_error("invalid storage port");
+}
+
+fs::path activeFile(unsigned slot) {
+    return fs::path("cluster-data") / ("shard-" + std::to_string(slot + 1) + ".active");
+}
+
+void saveActivePort(unsigned slot, int port) {
+    auto file = activeFile(slot);
+    auto tmp = file.string() + ".tmp";
+    std::ofstream out(tmp, std::ios::trunc);
+    out << port << '\n';
+    out.close();
+    if (!out) throw std::runtime_error("could not persist promotion");
+    fs::rename(tmp, file);
+}
+
+int loadActivePort(unsigned slot) {
+    int defaultPort = firstPort + static_cast<int>(slot);
+    std::ifstream in(activeFile(slot));
+    if (!in) return defaultPort;
+    int port = 0;
+    std::string extra;
+    if (!(in >> port) || (in >> extra) ||
+        (port != defaultPort && port != firstReplicaPort + static_cast<int>(slot)))
+        throw std::runtime_error("invalid active-shard marker");
+    return port;
+}
+
+// Copy the complete append-only log only while the standby process is stopped.
+// Router operations are serialized on the manager's event loop.
+void seedStandby(int fromPort, int toPort) {
+    auto sourceDir = nodeDir(fromPort);
+    auto targetDir = nodeDir(toPort);
+    fs::create_directories(targetDir / "data");
+    fs::copy_file(sourceDir / "capacity.bytes", targetDir / "capacity.bytes",
+                  fs::copy_options::overwrite_existing);
+    auto log = sourceDir / "data/appendonly.log";
+    auto copy = targetDir / "data/appendonly.log";
+    if (fs::exists(log)) {
+        auto temp = copy.string() + ".copying";
+        fs::copy_file(log, temp, fs::copy_options::overwrite_existing);
+        fs::rename(temp, copy);
+    } else {
+        fs::remove(copy);
+    }
+}
+
 void saveCapacity(const fs::path& file, Bytes bytes) {
     auto temp = file.string() + ".tmp";
     std::ofstream out(temp, std::ios::trunc);
@@ -180,37 +236,70 @@ Bytes savedCapacity(const fs::path& file) {
     return n;
 }
 
+// Live primary->replica mapping is used by the serialized router.
+std::map<int, int> mirrors;
+std::set<int> needsResync;
+
 struct Cluster {
     fs::path binary;
     Bytes capacity;
     unsigned limit;
     std::vector<std::unique_ptr<Node>> nodes;
+    bool replication = false;
+    std::vector<std::unique_ptr<Node>> replicas;
+    std::vector<unsigned> promotions;
 
     bool active(int port) const {
-        return port >= firstPort && static_cast<unsigned>(port - firstPort) < nodes.size();
+        return std::any_of(nodes.begin(), nodes.end(),
+                           [port](const auto& n) { return n->port == port; });
+    }
+
+    // MOVE journals may refer to a former primary's physical port.
+    int currentPort(int port) const {
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+            if (nodes[i]->port == port) return port;
+            if (replication && replicas[i]->port == port) return nodes[i]->port;
+        }
+        throw std::runtime_error("port does not belong to an active shard");
     }
 
     int launch() {
         if (nodes.size() >= limit) throw std::runtime_error("cluster capacity reached");
-        auto child = std::make_unique<Node>();
-        child->port = firstPort + static_cast<int>(nodes.size());
-        auto dir = fs::path("cluster-data") / ("node-" + std::to_string(nodes.size()+1));
+        unsigned slot = static_cast<unsigned>(nodes.size());
+        int base = firstPort + static_cast<int>(slot);
+        int backup = firstReplicaPort + static_cast<int>(slot);
+        int activePort = replication ? loadActivePort(slot) : base;
+        int standbyPort = activePort == base ? backup : base;
+        auto primary = std::make_unique<Node>();
+        primary->port = activePort;
+        auto dir = nodeDir(activePort);
         fs::create_directories(dir);
         auto file = dir / "capacity.bytes";
         if (!fs::exists(file)) saveCapacity(file, capacity);
-        start(*child, binary, dir, savedCapacity(file));
+        start(*primary, binary, dir, savedCapacity(file));
         if (stopping) throw std::runtime_error("manager stopping");
-        int port = child->port;
-        nodes.push_back(std::move(child));
-        return port;
+        std::unique_ptr<Node> standby;
+        if (replication) {
+            standby = std::make_unique<Node>();
+            standby->port = standbyPort;
+            seedStandby(activePort, standbyPort);
+            start(*standby, binary, nodeDir(standbyPort), savedCapacity(nodeDir(standbyPort) / "capacity.bytes"));
+            if (stopping) throw std::runtime_error("manager stopping");
+        }
+        nodes.push_back(std::move(primary));
+        if (replication) {
+            replicas.push_back(std::move(standby));
+            mirrors[activePort] = standbyPort;
+        }
+        promotions.push_back(0);
+        return activePort;
     }
 
     void restore() {
         unsigned count = 1;
         for (unsigned id = 2; id <= maxLocalNodes; ++id) {
-            auto log = fs::path("cluster-data") / ("node-" + std::to_string(id)) /
-                       "data/appendonly.log";
-            if (fs::exists(log)) {
+            auto dir = fs::path("cluster-data") / ("node-" + std::to_string(id));
+            if (fs::exists(dir / "data/appendonly.log") || fs::exists(dir / "capacity.bytes")) {
                 if (id != count + 1 || id > limit)
                     throw std::runtime_error("existing nodes exceed limit or node directory is missing");
                 count = id;
@@ -219,39 +308,78 @@ struct Cluster {
         while (nodes.size() < count) launch();
     }
 
-    // OS process supervision: restart a crashed node using its original
-    // data directory, so the storage server can replay its append-only log.
-    // After five consecutive failed restarts, stop to avoid a crash loop.
+    void restart(Node& node) {
+        using Clock = std::chrono::steady_clock;
+        auto now = Clock::now();
+        if (node.alive() || now < node.retryAfter) return;
+        if (node.restartFailures >= 5)
+            throw std::runtime_error("node " + std::to_string(node.port) + " repeatedly failed to restart");
+        ++node.restartFailures;
+        std::cerr << "SUPERVISOR crash port=" << node.port
+                  << " attempt=" << node.restartFailures << "\n";
+        try {
+            auto dir = nodeDir(node.port);
+            start(node, binary, dir, savedCapacity(dir / "capacity.bytes"));
+            ++node.totalRestarts;
+            std::cout << "SUPERVISOR recovered port=" << node.port
+                      << " pid=" << node.pid << "\n";
+        } catch (const std::exception& e) {
+            node.terminate();
+            node.retryAfter = Clock::now() + std::chrono::seconds(1u << node.restartFailures);
+            std::cerr << "SUPERVISOR restart failed port=" << node.port
+                      << " reason=" << e.what() << "\n";
+        }
+    }
+
+    // A crash promotes an in-sync standby; if no trustworthy standby exists,
+    // the active node is restarted from its own AOF instead.
     void supervise() {
         using Clock = std::chrono::steady_clock;
         auto now = Clock::now();
         for (std::size_t i = 0; i < nodes.size(); ++i) {
-            auto& node = *nodes[i];
-            if (node.alive()) {
-                if (node.startedAt != Clock::time_point{} &&
-                    now - node.startedAt >= 60s) node.restartFailures = 0;
+            auto& primary = *nodes[i];
+            if (!primary.alive()) {
+                if (replication && replicas[i]->alive() &&
+                    stats(replicas[i]->port) && !needsResync.count(primary.port)) {
+                    int old = primary.port;
+                    int replacement = replicas[i]->port;
+                    saveActivePort(static_cast<unsigned>(i), replacement);
+                    std::swap(nodes[i], replicas[i]);
+                    mirrors.erase(old);
+                    mirrors[replacement] = old;
+                    needsResync.erase(old);
+                    ++promotions[i];
+                    std::cout << "FAILOVER shard=" << i + 1 << " old=" << old
+                              << " promoted=" << replacement << "\n";
+                } else {
+                    restart(primary);
+                }
+            } else if (primary.startedAt != Clock::time_point{} &&
+                       now - primary.startedAt >= 60s) {
+                primary.restartFailures = 0;
+            }
+            if (!replication || !nodes[i]->alive()) continue;
+            auto& leader = *nodes[i];
+            auto& standby = *replicas[i];
+            if (standby.alive() && stats(standby.port) && !needsResync.count(leader.port)) {
+                if (standby.startedAt != Clock::time_point{} &&
+                    now - standby.startedAt >= 60s) standby.restartFailures = 0;
                 continue;
             }
-            if (now < node.retryAfter) continue;
-            if (node.restartFailures >= 5)
-                throw std::runtime_error("node " + std::to_string(node.port) +
-                                         " repeatedly failed to restart");
-            ++node.restartFailures;
-            std::cerr << "SUPERVISOR crash port=" << node.port
-                      << " attempt=" << node.restartFailures << "\n";
+            if (Clock::now() < standby.retryAfter) continue;
+            // Stop a possibly divergent standby before rewriting its AOF.
+            standby.terminate();
             try {
-                auto dir = fs::path("cluster-data") /
-                           ("node-" + std::to_string(i + 1));
-                start(node, binary, dir, capacity);
-                ++node.totalRestarts;
-                std::cout << "SUPERVISOR recovered port=" << node.port
-                          << " pid=" << node.pid << "\n";
+                seedStandby(leader.port, standby.port);
+                restart(standby);
+                if (standby.alive() && stats(standby.port)) {
+                    needsResync.erase(leader.port);
+                    std::cout << "REPLICA synchronized shard=" << i + 1
+                              << " port=" << standby.port << "\n";
+                }
             } catch (const std::exception& e) {
-                node.terminate(); // clean up a process that started but never became ready
-                auto backoff = std::chrono::seconds(1u << node.restartFailures);
-                node.retryAfter = Clock::now() + backoff;
-                std::cerr << "SUPERVISOR restart failed port=" << node.port
-                          << " reason=" << e.what() << "\n";
+                std::cerr << "REPLICA sync failed: " << e.what() << "\n";
+                standby.retryAfter = Clock::now() + 2s;
             }
         }
     }
@@ -260,7 +388,7 @@ struct Cluster {
 // All node commands go through this loop, so concurrent requests cannot
 // choose different homes for the same previously unseen key.
 constexpr std::size_t maxLine = 1024 * 1024;
-std::string nodeRequest(int port, std::string request) {
+std::string nodeRequestRaw(int port, std::string request) {
     FD fd(socket(AF_INET, SOCK_STREAM, 0));
     timeval limit{1, 0};
     auto addr = addressFor(port);
@@ -287,6 +415,27 @@ std::string nodeRequest(int port, std::string request) {
         if (response.back() == '\n') { response.pop_back(); return response; }
     }
     throw std::runtime_error("node reply too large");
+}
+
+// Mirror mutating commands before acknowledging them to clients.
+// Not a consensus protocol: an unacknowledged in-flight write may be lost.
+std::string nodeRequest(int port, std::string request) {
+    bool mutation = request.starts_with("SET ") || request.starts_with("DEL ");
+    auto mirror = mirrors.find(port);
+    if (!mutation || mirror == mirrors.end()) return nodeRequestRaw(port, std::move(request));
+    if (needsResync.count(port) || !stats(mirror->second))
+        return "ERR replica unavailable; write not applied";
+    auto answer = nodeRequestRaw(port, request);
+    if (answer == "OK" || (request.starts_with("DEL ") && (answer == "0" || answer == "1"))) {
+        try {
+            auto mirrored = nodeRequestRaw(mirror->second, request);
+            if (mirrored != answer) throw std::runtime_error("replica reply differs");
+        } catch (const std::exception&) {
+            needsResync.insert(port);
+            return "ERR replication failed; primary may have committed write";
+        }
+    }
+    return answer;
 }
 
 // Only the router writes to the nodes during migration. Its single event loop
@@ -327,9 +476,11 @@ void recoverMove(const Cluster& cluster) {
     std::ifstream input(pendingMove);
     int source, dest;
     std::string key, value, extra;
-    if (!(input >> source >> dest >> key) ||
-        source == dest || !cluster.active(source) || !cluster.active(dest))
+    if (!(input >> source >> dest >> key) || source == dest)
         throw std::runtime_error("invalid pending-move journal");
+    source = cluster.currentPort(source);
+    dest = cluster.currentPort(dest);
+    if (source == dest) throw std::runtime_error("invalid pending-move journal");
     std::optional<std::string> update;
     if (input >> value) update = value;
     if (input >> extra) throw std::runtime_error("invalid pending-move journal");
@@ -423,12 +574,25 @@ std::string route(const std::string& line, Cluster& cluster) {
     if (op == "CLUSTER" && (in >> key) && key == "STATUS" && !(in >> extra)) {
         std::string reply = "nodes=" + std::to_string(cluster.nodes.size()) +
                             " max_nodes=" + std::to_string(cluster.limit);
-        for (const auto& node : cluster.nodes) {
+        for (std::size_t i = 0; i < cluster.nodes.size(); ++i) {
+            const auto& node = cluster.nodes[i];
             auto st = stats(node->port);
             reply += " port=" + std::to_string(node->port) + " ";
             reply += st ? std::to_string(st->used) + "/" + std::to_string(st->max) : "unavailable";
             reply += " pid=" + std::to_string(node->pid) +
                      " restarts=" + std::to_string(node->totalRestarts);
+            if (cluster.replication) {
+                const auto& standby = cluster.replicas[i];
+                auto replicaStats = stats(standby->port);
+                reply += " replica=" + std::to_string(standby->port) +
+                         " replica_pid=" + std::to_string(standby->pid) +
+                         " replica_state=" +
+                         (replicaStats && !needsResync.count(node->port) ? "ready" : "degraded") +
+                         " replica_usage=" +
+                         (replicaStats ? std::to_string(replicaStats->used) + "/" +
+                                         std::to_string(replicaStats->max) : "unavailable") +
+                         " promotions=" + std::to_string(cluster.promotions[i]);
+            }
         }
         return reply;
     }
@@ -547,28 +711,45 @@ public:
 // This operation requires local filesystem ownership, and is never routed from TCP.
 int resizeLocal(std::string_view portText, std::string_view sizeText) {
     Bytes port, size;
-    if (!parseNumber(portText, port) || port < firstPort || port >= firstPort + maxLocalNodes ||
-        !parseNumber(sizeText, size) || !size)
+    if (!parseNumber(portText, port) || !parseNumber(sizeText, size) || !size)
         throw std::runtime_error("Usage: cluster-manager resize NODE_PORT NEW_BYTES");
-    auto dir = fs::path("cluster-data") / ("node-" + std::to_string(port - firstPort + 1));
-    auto file = dir / "capacity.bytes";
-    if (!fs::exists(file)) throw std::runtime_error("no such managed node in this working directory");
+    unsigned slot;
+    if (port >= firstPort && port < firstPort + maxLocalNodes)
+        slot = static_cast<unsigned>(port - firstPort);
+    else if (port >= firstReplicaPort && port < firstReplicaPort + maxLocalNodes)
+        slot = static_cast<unsigned>(port - firstReplicaPort);
+    else throw std::runtime_error("invalid node port");
+    auto runningDir = nodeDir(loadActivePort(slot));
+    auto file = runningDir / "capacity.bytes";
+    if (!fs::exists(file)) throw std::runtime_error("no managed node in this working directory");
     FD running(open("cluster-data/manager.lock", O_RDWR | O_CLOEXEC));
     if (running.value < 0 || flock(running.value, LOCK_EX | LOCK_NB) == 0 ||
         (errno != EWOULDBLOCK && errno != EAGAIN))
         throw std::runtime_error("no running manager in this directory");
     FD guard(open("cluster-data/resize.lock", O_RDWR | O_CREAT | O_CLOEXEC, 0600));
-    if (guard.value < 0 || flock(guard.value, LOCK_EX)) throw std::runtime_error("cannot lock resize operation");
-    auto current = stats(static_cast<int>(port));
-    if (!current) throw std::runtime_error("node is unavailable");
+    if (guard.value < 0 || flock(guard.value, LOCK_EX))
+        throw std::runtime_error("cannot lock resize operation");
+    int activePort = loadActivePort(slot);
+    int standbyPort = activePort == firstPort + static_cast<int>(slot) ?
+                      firstReplicaPort + static_cast<int>(slot) : firstPort + static_cast<int>(slot);
+    auto current = stats(activePort);
+    if (!current) throw std::runtime_error("node unavailable");
     if (size < std::max(savedCapacity(file), current->max))
         throw std::runtime_error("only increases are supported");
     saveCapacity(file, size);
-    auto reply = nodeRequest(static_cast<int>(port), "RELOADCAP");
-    auto applied = stats(static_cast<int>(port));
+    auto reply = nodeRequestRaw(activePort, "RELOADCAP");
+    auto applied = stats(activePort);
     if (reply != "OK" || !applied || applied->max != size)
-        throw std::runtime_error("budget saved; live change unconfirmed. Retry from the manager's directory");
-    std::cout << "OK port=" << port << " max_bytes=" << size << '\n';
+        throw std::runtime_error("budget saved; live change unconfirmed");
+    auto standbyFile = nodeDir(standbyPort) / "capacity.bytes";
+    if (fs::exists(standbyFile)) {
+        saveCapacity(standbyFile, size);
+        auto standbyReply = nodeRequestRaw(standbyPort, "RELOADCAP");
+        auto s = stats(standbyPort);
+        if (standbyReply != "OK" || !s || s->max != size)
+            throw std::runtime_error("primary resized; standby live change unconfirmed");
+    }
+    std::cout << "OK port=" << activePort << " max_bytes=" << size << '\n';
     return 0;
 }
 } // namespace
@@ -579,12 +760,13 @@ int main(int argc, char* argv[]) {
         try { return resizeLocal(argv[2], argv[3]); }
         catch (const std::exception& e) { std::cerr << "Resize: " << e.what() << '\n'; return 1; }
     }
-    Bytes percent = 80, capacity = 4096, limit = 2;
-    if (argc < 2 || argc > 5 ||
+    Bytes percent = 80, capacity = 4096, limit = 2, replicas = 0;
+    if (argc < 2 || argc > 6 ||
         (argc >= 3 && !parseNumber(argv[2], percent)) || percent < 1 || percent > 99 ||
         (argc >= 4 && !parseNumber(argv[3], capacity)) || capacity == 0 ||
-        (argc == 5 && !parseNumber(argv[4], limit)) || limit == 0 || limit > maxLocalNodes) {
-        std::cerr << "Usage: cluster-manager PATH_TO_FAST_KV [threshold_percent 1..99] [capacity_bytes > 0] [max_nodes 1..32]\n";
+        (argc >= 5 && !parseNumber(argv[4], limit)) || limit == 0 || limit > maxLocalNodes ||
+        (argc == 6 && !parseNumber(argv[5], replicas)) || replicas > 1) {
+        std::cerr << "Usage: cluster-manager PATH_TO_FAST_KV [threshold_percent 1..99] [capacity_bytes > 0] [max_nodes 1..32] [replicas 0|1]\n";
         return 1;
     }
     try {
@@ -601,7 +783,7 @@ int main(int argc, char* argv[]) {
         // Round up without overflowing capacity * percent.
         Bytes trigger = capacity / 100 * percent + (capacity % 100 * percent + 99) / 100;
         std::cout << "Scale at " << percent << "% (" << trigger << "/" << capacity << " bytes)" << std::endl;
-        Cluster cluster{binary, capacity, static_cast<unsigned>(limit), {}};
+        Cluster cluster{binary, capacity, static_cast<unsigned>(limit), {}, replicas == 1, {}, {}};
         cluster.restore();
         if (!stopping) recoverMove(cluster);
         Router router;

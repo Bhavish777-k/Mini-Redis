@@ -39,6 +39,13 @@ target_compile_options(fast-kv PRIVATE
     -Wpedantic
 )
 
+# Cluster supervisor/router. POSIX process APIs (fork, waitpid, flock, poll).
+if(UNIX)
+    add_executable(cluster-manager cluster/manager.cpp)
+    target_link_libraries(cluster-manager PRIVATE Threads::Threads)
+    target_compile_options(cluster-manager PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 # Unit tests
 enable_testing()
 

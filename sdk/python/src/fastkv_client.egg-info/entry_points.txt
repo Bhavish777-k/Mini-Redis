@@ -1,0 +1,2 @@
+[console_scripts]
+fastkv-cli = fastkv.cli:main

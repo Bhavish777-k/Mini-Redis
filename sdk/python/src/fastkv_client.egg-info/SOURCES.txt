@@ -1,0 +1,11 @@
+README.md
+pyproject.toml
+src/fastkv/__init__.py
+src/fastkv/__main__.py
+src/fastkv/cli.py
+src/fastkv/client.py
+src/fastkv_client.egg-info/PKG-INFO
+src/fastkv_client.egg-info/SOURCES.txt
+src/fastkv_client.egg-info/dependency_links.txt
+src/fastkv_client.egg-info/entry_points.txt
+src/fastkv_client.egg-info/top_level.txt

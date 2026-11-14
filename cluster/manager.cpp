@@ -648,6 +648,62 @@ std::string moveKey(const std::string& key, int source, int dest,
     return "OK";
 }
 
+// Time-limited keys are coordinated by the manager, not by individual shards.
+// The absolute expiry timestamp follows the logical key when its physical home changes.
+// Metadata is stored atomically in cluster-data, so restarts do not reset the timer.
+Bytes unixMillis() {
+    return static_cast<Bytes>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+struct ExpiryIndex {
+    std::map<std::string, Bytes> deadline;
+    const fs::path path = fs::path("cluster-data") / "expirations.meta";
+
+    void load() {
+        std::ifstream in(path);
+        if (!in) {
+            if (fs::exists(path)) throw std::runtime_error("cannot read expiry metadata");
+            return;
+        }
+        std::map<std::string, Bytes> parsed;
+        std::string key, number, extra;
+        while (in >> key >> number) {
+            Bytes until = 0;
+            if (key.empty() || !parseNumber(number, until) || until == 0 ||
+                key.find_first_of("\r\n \t") != std::string::npos)
+                throw std::runtime_error("corrupt expiry metadata");
+            parsed[key] = until;
+        }
+        if (!in.eof()) throw std::runtime_error("corrupt expiry metadata");
+        deadline = std::move(parsed);
+    }
+
+    void replace(std::map<std::string, Bytes> next) {
+        auto temp = path.string() + ".tmp";
+        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+        if (!out) throw std::runtime_error("cannot create expiry metadata");
+        for (const auto& [key, until] : next) out << key << ' ' << until << '\n';
+        out.close();
+        if (!out) throw std::runtime_error("cannot save expiry metadata");
+        fs::rename(temp, path);
+        deadline = std::move(next);
+    }
+    void set(const std::string& key, Bytes until) {
+        auto next = deadline;
+        next[key] = until;
+        replace(std::move(next));
+    }
+    bool clear(const std::string& key) {
+        if (!deadline.count(key)) return false;
+        auto next = deadline;
+        next.erase(key);
+        replace(std::move(next));
+        return true;
+    }
+};
+ExpiryIndex expiryIndex;
+
 Bytes freeBytes(const Stats& node) {
     return node.max - std::min(node.used, node.max);
 }
@@ -660,6 +716,30 @@ int findOwner(const Cluster& cluster, const std::string& key) {
         owner = node->port;
     }
     return owner;
+}
+
+// Remove the physical key (and its replica copy) once the absolute deadline passes.
+// On failure, leave the deadline recorded so a later sweep can retry.
+void expireOne(Cluster& cluster, const std::string& key) {
+    auto it = expiryIndex.deadline.find(key);
+    if (it == expiryIndex.deadline.end() || it->second > unixMillis()) return;
+    int owner = findOwner(cluster, key);
+    if (owner) {
+        auto result = nodeRequest(owner, "DEL " + key);
+        if (result != "1" && result != "0")
+            throw std::runtime_error("expiration deletion failed: " + result);
+    }
+    expiryIndex.clear(key);
+}
+
+void sweepExpired(Cluster& cluster) {
+    std::vector<std::string> due;
+    Bytes now = unixMillis();
+    for (const auto& [key, until] : expiryIndex.deadline) {
+        if (until <= now) due.push_back(key);
+        if (due.size() == 32) break; // Bound reactor latency per sweep.
+    }
+    for (const auto& key : due) expireOne(cluster, key);
 }
 
 std::string placeValue(const std::string& key, const std::string& value,
@@ -698,6 +778,32 @@ std::string route(const std::string& line, Cluster& cluster) {
     in >> op;
     for (char& c : op) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     recoverMove(cluster); // Reconcile any interrupted operation before serving another request.
+    if (op == "EXPIRE" || op == "TTL" || op == "PERSIST") {
+        std::string amount;
+        if (!(in >> key) || (op == "EXPIRE" && !(in >> amount)) || (in >> extra))
+            return "ERR invalid arguments";
+        if (op == "EXPIRE") {
+            Bytes seconds = 0;
+            if (!parseNumber(amount, seconds) || seconds > 3153600000ULL)
+                return "ERR expiration must be 0..3153600000 seconds";
+            expireOne(cluster, key);
+            if (!findOwner(cluster, key)) { expiryIndex.clear(key); return "0"; }
+            Bytes now = unixMillis();
+            if (seconds > (std::numeric_limits<Bytes>::max() - now) / 1000)
+                return "ERR expiration overflow";
+            expiryIndex.set(key, now + seconds * 1000);
+            expireOne(cluster, key); // EXPIRE key 0 deletes immediately.
+            return "1";
+        }
+        expireOne(cluster, key);
+        if (!findOwner(cluster, key)) { expiryIndex.clear(key); return op == "TTL" ? "-2" : "0"; }
+        if (op == "PERSIST") return expiryIndex.clear(key) ? "1" : "0";
+        auto it = expiryIndex.deadline.find(key);
+        if (it == expiryIndex.deadline.end()) return "-1";
+        Bytes now = unixMillis();
+        if (it->second <= now) { expireOne(cluster, key); return "-2"; }
+        return std::to_string((it->second - now) / 1000);
+    }
     if (op == "MOVE") {
         std::string port;
         Bytes number;
@@ -762,6 +868,7 @@ std::string route(const std::string& line, Cluster& cluster) {
         }
         return reply;
     }
+    if (op == "COUNT") sweepExpired(cluster);
     if (op == "PING" && !(in >> extra)) return "PONG";
     if (op == "COUNT" && !(in >> extra)) {
         Bytes sum = 0;
@@ -776,6 +883,7 @@ std::string route(const std::string& line, Cluster& cluster) {
         op != "EXISTS" && op != "WHERE") return "ERR unknown or unsupported command";
     if (!(in >> key) || (op == "SET" && !(in >> value)) || (in >> extra))
         return "ERR invalid arguments";
+    expireOne(cluster, key);
     int owner = findOwner(cluster, key);
     if (op == "WHERE") return owner ? std::to_string(owner) : "(nil)";
     if (op == "SET" || op == "INCR") {
@@ -793,10 +901,13 @@ std::string route(const std::string& line, Cluster& cluster) {
             value = std::to_string(n + 1);
         }
         auto status = placeValue(key, value, owner, previous, cluster);
+        if (status == "OK" && op == "SET") expiryIndex.clear(key);
         return status == "OK" && op == "INCR" ? value : status;
     }
-    if (!owner) return op == "GET" ? "(nil)" : "0";
-    return nodeRequest(owner, line);
+    if (!owner) { expiryIndex.clear(key); return op == "GET" ? "(nil)" : "0"; }
+    auto result = nodeRequest(owner, line);
+    if (op == "DEL" && result == "1") expiryIndex.clear(key);
+    return result;
 }
 
 void makeNonblocking(int fd) {
@@ -812,14 +923,14 @@ class Router {
 public:
     Router() {
         int one = 1;
-        auto addr = addressFor(7000);
+        auto addr = addressFor(7001);
         if (listener.value < 0 ||
             setsockopt(listener.value, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) ||
             bind(listener.value, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) ||
             listen(listener.value, 128))
-            throw std::runtime_error("cannot listen on localhost:7000");
+            throw std::runtime_error("cannot listen on localhost:7001");
         makeNonblocking(listener.value);
-        std::cout << "ROUTER listening on 127.0.0.1:7000" << std::endl;
+        std::cout << "ROUTER listening on 127.0.0.1:7001" << std::endl;
     }
     ~Router() { for (auto& entry : clients) close(entry.first); }
 
@@ -952,11 +1063,18 @@ int main(int argc, char* argv[]) {
         std::cout << "Scale at " << percent << "% (" << trigger << "/" << capacity << " bytes)" << std::endl;
         Cluster cluster{binary, capacity, static_cast<unsigned>(limit), {}, replicas == 1, {}, {}};
         cluster.restore();
+        expiryIndex.load();
         if (!stopping) recoverMove(cluster);
         Router router;
         auto nextCheck = std::chrono::steady_clock::now();
+        auto nextExpireSweep = std::chrono::steady_clock::now();
         while (!stopping) {
             cluster.supervise();
+            if (std::chrono::steady_clock::now() >= nextExpireSweep) {
+                try { sweepExpired(cluster); }
+                catch (const std::exception& e) { std::cerr << "Expiry sweep deferred: " << e.what() << '\n'; }
+                nextExpireSweep = std::chrono::steady_clock::now() + 500ms;
+            }
             if (cluster.nodes.size() < cluster.limit && std::chrono::steady_clock::now() >= nextCheck) {
                 nextCheck = std::chrono::steady_clock::now() + 200ms;
                 // Add headroom only when every active node has crossed the threshold.

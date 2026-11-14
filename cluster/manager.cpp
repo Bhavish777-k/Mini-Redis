@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <map>
 #include <set>
 #include <memory>
@@ -13,6 +14,10 @@
 #include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <sys/resource.h>
+#if defined(__APPLE__)
+#include <libproc.h>
+#endif
 #include <unistd.h>
 
 #include <cerrno>
@@ -23,6 +28,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
+#include <iterator>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -40,6 +46,134 @@ bool parseNumber(std::string_view text, Bytes& n) {
     const char* end = text.data() + text.size();
     auto result = std::from_chars(text.data(), end, n);
     return result.ec == std::errc{} && result.ptr == end;
+}
+
+// Optional OS-level resource controls. Key-value data quotas remain separate.
+// Linux cgroups require a pre-delegated, writable cgroup v2 parent directory.
+struct OSConfig {
+    std::optional<Bytes> nofileLimit;
+    std::optional<Bytes> memoryLimit;
+    fs::path cgroupParent;
+};
+OSConfig osConfig;
+
+OSConfig readOSConfig() {
+    OSConfig config;
+    if (const char* text = std::getenv("FASTKV_NOFILE_LIMIT")) {
+        Bytes limit = 0;
+        if (!parseNumber(text, limit) || limit < 64)
+            throw std::runtime_error("FASTKV_NOFILE_LIMIT must be >= 64");
+        struct rlimit available{};
+        if (getrlimit(RLIMIT_NOFILE, &available) != 0 || limit > available.rlim_max)
+            throw std::runtime_error("FASTKV_NOFILE_LIMIT exceeds the process hard limit");
+        config.nofileLimit = limit;
+    }
+    const char* parent = std::getenv("FASTKV_CGROUP_PARENT");
+    const char* bytes = std::getenv("FASTKV_NODE_MEMORY_MAX_BYTES");
+    if (bool(parent) != bool(bytes))
+        throw std::runtime_error("set both FASTKV_CGROUP_PARENT and FASTKV_NODE_MEMORY_MAX_BYTES");
+    if (parent) {
+#if defined(__linux__)
+        Bytes limit = 0;
+        if (!parseNumber(bytes, limit) || limit < 16 * 1024 * 1024)
+            throw std::runtime_error("FASTKV_NODE_MEMORY_MAX_BYTES must be at least 16 MiB");
+        config.memoryLimit = limit;
+        config.cgroupParent = fs::canonical(parent);
+        if (!fs::exists(config.cgroupParent / "cgroup.controllers") ||
+            !fs::exists(config.cgroupParent / "cgroup.subtree_control"))
+            throw std::runtime_error("FASTKV_CGROUP_PARENT must be a cgroup v2 directory");
+        std::ifstream enabled(config.cgroupParent / "cgroup.subtree_control");
+        std::string tokens((std::istreambuf_iterator<char>(enabled)),
+                           std::istreambuf_iterator<char>());
+        if (tokens.find("memory") == std::string::npos)
+            throw std::runtime_error("memory controller not delegated/enabled in cgroup.subtree_control");
+#else
+        throw std::runtime_error("Linux cgroups v2 memory enforcement requires Linux; Mac supports OSSTATS and RLIMIT_NOFILE");
+#endif
+    }
+    return config;
+}
+
+#if defined(__linux__)
+fs::path cgroupFor(int port) {
+    return osConfig.cgroupParent / ("fastkv-" + std::to_string(port));
+}
+void prepareCgroup(int port) {
+    if (!osConfig.memoryLimit) return;
+    auto group = cgroupFor(port);
+    if (!fs::exists(group)) fs::create_directory(group);
+    std::ofstream maximum(group / "memory.max");
+    maximum << *osConfig.memoryLimit << '\n';
+    maximum.close();
+    if (!maximum) throw std::runtime_error("cannot write memory.max; check cgroup delegation");
+}
+#endif
+
+void applyChildOSControls(int port) {
+    if (osConfig.nofileLimit) {
+        struct rlimit current{};
+        if (getrlimit(RLIMIT_NOFILE, &current) != 0) _exit(111);
+        if (*osConfig.nofileLimit > current.rlim_max) _exit(111);
+        current.rlim_cur = static_cast<rlim_t>(*osConfig.nofileLimit);
+        if (setrlimit(RLIMIT_NOFILE, &current) != 0) _exit(111);
+    }
+#if defined(__linux__)
+    if (osConfig.memoryLimit) {
+        // Join before exec; avoid running the KV process outside its memory cgroup.
+        std::ofstream membership(cgroupFor(port) / "cgroup.procs");
+        membership << getpid() << '\n';
+        membership.close();
+        if (!membership) _exit(111);
+    }
+#else
+    (void)port;
+#endif
+}
+
+std::optional<Bytes> residentBytes(pid_t pid) {
+    if (pid <= 0) return {};
+#if defined(__linux__)
+    std::ifstream statm("/proc/" + std::to_string(pid) + "/statm");
+    Bytes pages = 0, resident = 0;
+    if (!(statm >> pages >> resident)) return {};
+    auto pageSize = sysconf(_SC_PAGESIZE);
+    if (pageSize <= 0) return {};
+    return resident * static_cast<Bytes>(pageSize);
+#elif defined(__APPLE__)
+    struct proc_taskinfo task{};
+    if (proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &task, sizeof(task)) != static_cast<int>(sizeof(task))) return {};
+    return static_cast<Bytes>(task.pti_resident_size);
+#else
+    return {};
+#endif
+}
+
+#if defined(__linux__)
+std::optional<Bytes> readBytesFile(const fs::path& file) {
+    std::ifstream input(file);
+    Bytes result = 0;
+    if (!(input >> result)) return {};
+    return result;
+}
+#endif
+
+std::string osReport(int port, pid_t pid, std::string_view role) {
+    std::string reply = std::string(role) + "=" + std::to_string(port) +
+                        " pid=" + std::to_string(pid);
+    auto rss = residentBytes(pid);
+    reply += " rss_bytes=" + (rss ? std::to_string(*rss) : "unavailable");
+    reply += " nofile_soft_limit=" +
+             (osConfig.nofileLimit ? std::to_string(*osConfig.nofileLimit) : "default");
+#if defined(__linux__)
+    if (osConfig.memoryLimit) {
+        auto current = readBytesFile(cgroupFor(port) / "memory.current");
+        reply += " cgroup_memory_bytes=" +
+                 (current ? std::to_string(*current) : "unavailable");
+        reply += " cgroup_max_bytes=" + std::to_string(*osConfig.memoryLimit);
+        return reply + " os_memory_enforced=yes";
+    }
+#endif
+    return reply + " os_memory_enforced=no";
 }
 
 struct FD {
@@ -139,11 +273,15 @@ void start(Node& node, const fs::path& binary, const fs::path& dir, Bytes capaci
         if (errno != ECONNREFUSED) throw std::runtime_error("Cannot check node port");
     }
     fs::create_directories(dir);
+#if defined(__linux__)
+    prepareCgroup(node.port);
+#endif
     std::string port = std::to_string(node.port);
     std::string bytes = std::to_string(capacity);
     node.pid = fork();
     if (node.pid < 0) throw std::runtime_error("fork failed");
     if (node.pid == 0) {
+        applyChildOSControls(node.port);
         if (chdir(dir.c_str()) < 0) { std::perror("chdir"); _exit(1); }
         execl(binary.c_str(), "fast-kv", port.c_str(), bytes.c_str(), static_cast<char*>(nullptr));
         std::perror("exec fast-kv");
@@ -612,6 +750,18 @@ std::string route(const std::string& line, Cluster& cluster) {
         }
         return reply;
     }
+    if (op == "OSSTATS" && !(in >> extra)) {
+        std::string reply;
+        for (std::size_t i = 0; i < cluster.nodes.size(); ++i) {
+            if (!reply.empty()) reply += " | ";
+            reply += osReport(cluster.nodes[i]->port, cluster.nodes[i]->pid, "node");
+            if (cluster.replication) {
+                reply += " | " + osReport(cluster.replicas[i]->port,
+                                           cluster.replicas[i]->pid, "replica");
+            }
+        }
+        return reply;
+    }
     if (op == "PING" && !(in >> extra)) return "PONG";
     if (op == "COUNT" && !(in >> extra)) {
         Bytes sum = 0;
@@ -786,6 +936,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     try {
+        osConfig = readOSConfig();
         auto binary = fs::canonical(argv[1]);
         fs::create_directories("cluster-data");
         fs::permissions("cluster-data", fs::perms::owner_all);

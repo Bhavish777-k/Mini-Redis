@@ -99,6 +99,10 @@ std::optional<Stats> stats(int port) {
 struct Node {
     int port;
     pid_t pid = -1;
+    unsigned restartFailures = 0;
+    unsigned totalRestarts = 0;
+    std::chrono::steady_clock::time_point startedAt{};
+    std::chrono::steady_clock::time_point retryAfter{};
 
     bool alive() {
         if (pid < 0) return false;
@@ -110,15 +114,18 @@ struct Node {
         return false;
     }
 
-    ~Node() {
+    void terminate() {
         if (!alive()) return;
         kill(pid, SIGTERM);
         for (int i = 0; i < 100 && alive(); ++i) std::this_thread::sleep_for(20ms);
         if (pid > 0) {
             kill(pid, SIGKILL);
             while (waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {}
+            pid = -1;
         }
     }
+
+    ~Node() { terminate(); }
 };
 
 void start(Node& node, const fs::path& binary, const fs::path& dir, Bytes capacity) {
@@ -145,6 +152,7 @@ void start(Node& node, const fs::path& binary, const fs::path& dir, Bytes capaci
         if (!node.alive()) throw std::runtime_error("Node exited during startup on port " + port);
         auto s = stats(node.port);
         if (s && s->max == capacity) {
+            node.startedAt = std::chrono::steady_clock::now();
             std::cout << "READY port=" << port << " pid=" << node.pid << std::endl;
             return;
         }
@@ -209,6 +217,43 @@ struct Cluster {
             }
         }
         while (nodes.size() < count) launch();
+    }
+
+    // OS process supervision: restart a crashed node using its original
+    // data directory, so the storage server can replay its append-only log.
+    // After five consecutive failed restarts, stop to avoid a crash loop.
+    void supervise() {
+        using Clock = std::chrono::steady_clock;
+        auto now = Clock::now();
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+            auto& node = *nodes[i];
+            if (node.alive()) {
+                if (node.startedAt != Clock::time_point{} &&
+                    now - node.startedAt >= 60s) node.restartFailures = 0;
+                continue;
+            }
+            if (now < node.retryAfter) continue;
+            if (node.restartFailures >= 5)
+                throw std::runtime_error("node " + std::to_string(node.port) +
+                                         " repeatedly failed to restart");
+            ++node.restartFailures;
+            std::cerr << "SUPERVISOR crash port=" << node.port
+                      << " attempt=" << node.restartFailures << "\n";
+            try {
+                auto dir = fs::path("cluster-data") /
+                           ("node-" + std::to_string(i + 1));
+                start(node, binary, dir, capacity);
+                ++node.totalRestarts;
+                std::cout << "SUPERVISOR recovered port=" << node.port
+                          << " pid=" << node.pid << "\n";
+            } catch (const std::exception& e) {
+                node.terminate(); // clean up a process that started but never became ready
+                auto backoff = std::chrono::seconds(1u << node.restartFailures);
+                node.retryAfter = Clock::now() + backoff;
+                std::cerr << "SUPERVISOR restart failed port=" << node.port
+                          << " reason=" << e.what() << "\n";
+            }
+        }
     }
 };
 
@@ -382,6 +427,8 @@ std::string route(const std::string& line, Cluster& cluster) {
             auto st = stats(node->port);
             reply += " port=" + std::to_string(node->port) + " ";
             reply += st ? std::to_string(st->used) + "/" + std::to_string(st->max) : "unavailable";
+            reply += " pid=" + std::to_string(node->pid) +
+                     " restarts=" + std::to_string(node->totalRestarts);
         }
         return reply;
     }
@@ -560,9 +607,7 @@ int main(int argc, char* argv[]) {
         Router router;
         auto nextCheck = std::chrono::steady_clock::now();
         while (!stopping) {
-            for (auto& node : cluster.nodes) {
-                if (!node->alive()) throw std::runtime_error("managed node exited");
-            }
+            cluster.supervise();
             if (cluster.nodes.size() < cluster.limit && std::chrono::steady_clock::now() >= nextCheck) {
                 nextCheck = std::chrono::steady_clock::now() + 200ms;
                 // Add headroom only when every active node has crossed the threshold.

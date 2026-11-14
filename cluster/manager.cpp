@@ -596,6 +596,22 @@ std::string route(const std::string& line, Cluster& cluster) {
         }
         return reply;
     }
+    // Owner-facing allocator telemetry, aggregated across active nodes and replicas.
+    if (op == "ALLOCSTATS" && !(in >> extra)) {
+        std::string reply;
+        for (std::size_t i = 0; i < cluster.nodes.size(); ++i) {
+            const auto& node = cluster.nodes[i];
+            if (!reply.empty()) reply += " | ";
+            reply += "node=" + std::to_string(node->port) + " " +
+                     nodeRequest(node->port, "ALLOCSTATS");
+            if (cluster.replication) {
+                const auto& standby = cluster.replicas[i];
+                reply += " | replica=" + std::to_string(standby->port) + " " +
+                         nodeRequest(standby->port, "ALLOCSTATS");
+            }
+        }
+        return reply;
+    }
     if (op == "PING" && !(in >> extra)) return "PONG";
     if (op == "COUNT" && !(in >> extra)) {
         Bytes sum = 0;

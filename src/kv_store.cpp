@@ -23,7 +23,12 @@ void KVStore::set(
 
     std::unique_lock<std::shared_mutex> lock(shard.mutex);
 
-    shard.data[key] = value;
+    // Prepare new value first: allocation failures leave an existing value intact.
+    std::pmr::string replacement(&slab_);
+    replacement.assign(value.data(), value.size());
+    auto [it, inserted] = shard.data.try_emplace(key, &slab_);
+    (void)inserted;
+    it->second.swap(replacement);
     memoryManager_.update(key, key.size() + value.size());
 }
 
@@ -41,7 +46,7 @@ bool KVStore::get(
         return false;
     }
 
-    value = it->second;
+    value.assign(it->second.data(), it->second.size());
     memoryManager_.touch(key);
     return true;
 }

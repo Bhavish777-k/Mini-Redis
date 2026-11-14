@@ -27,6 +27,7 @@ add_executable(fast-kv
     src/thread_pool.cpp
     src/persistence.cpp
     src/memory_manager.cpp
+    src/slab_allocator.cpp
     src/metrics.cpp
 )
 
@@ -101,3 +102,12 @@ target_link_libraries(benchmark_client PRIVATE Threads::Threads)
 target_sources(test_kv_store PRIVATE src/memory_manager.cpp)
 target_sources(test_concurrency PRIVATE src/memory_manager.cpp)
 target_sources(test_persistence PRIVATE src/memory_manager.cpp)
+# OS memory-allocation experiments (a real PMR resource used by KVStore values).
+foreach(target test_kv_store test_concurrency test_persistence test_eviction)
+    target_sources(${target} PRIVATE src/slab_allocator.cpp)
+endforeach()
+
+add_executable(test_slab_allocator tests/test_slab_allocator.cpp
+    src/slab_allocator.cpp src/kv_store.cpp src/memory_manager.cpp)
+target_link_libraries(test_slab_allocator PRIVATE Threads::Threads)
+add_test(NAME SlabAllocatorTest COMMAND test_slab_allocator)

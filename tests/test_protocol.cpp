@@ -35,6 +35,10 @@ void testValidCommands() {
     ));
 
     assert(Protocol::isValid(
+        Protocol::parse("ALLOCSTATS")
+    ));
+
+    assert(Protocol::isValid(
         Protocol::parse("SET name Rahul")
     ));
 
@@ -52,6 +56,10 @@ void testValidCommands() {
 void testInvalidCommands() {
     assert(!Protocol::isValid(
         Protocol::parse("SET name")
+    ));
+
+    assert(!Protocol::isValid(
+        Protocol::parse("ALLOCSTATS unexpected")
     ));
 
     assert(!Protocol::isValid(

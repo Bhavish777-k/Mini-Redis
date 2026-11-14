@@ -8,6 +8,9 @@
 #include <unordered_map>
 #include <list>
 #include <optional>
+#include <memory_resource>
+
+#include "slab_allocator.h"
 
 #include "memory_manager.h"
 
@@ -17,6 +20,7 @@ public:
     bool grow(std::size_t bytes) { return memoryManager_.grow(bytes); }
     std::size_t usedBytes() const { return memoryManager_.usedBytes(); }
     std::size_t maxBytes() const { return memoryManager_.maxBytes(); }
+    SlabResource::Stats allocatorStats() const { return slab_.stats(); }
 
     KVStore(const KVStore&) = delete;
     KVStore& operator=(const KVStore&) = delete;
@@ -46,9 +50,11 @@ private:
 
     struct Shard {
         mutable std::shared_mutex mutex;
-        std::unordered_map<std::string, std::string> data;
+        std::unordered_map<std::string, std::pmr::string> data;
     };
 
+    // Declared before shards_, so pooled values are destroyed before the resource.
+    SlabResource slab_;
     std::array<Shard, SHARD_COUNT> shards_;
     mutable MemoryManager memoryManager_;
 

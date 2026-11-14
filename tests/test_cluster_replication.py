@@ -69,6 +69,10 @@ def run(manager, server):
                 status = ask(7000, 'CLUSTER STATUS')
                 assert 'replica=7381' in status, status
                 assert ask(7000, 'SET city old') == 'OK'
+                allocation = ask(7000, 'ALLOCSTATS')
+                assert 'node=6381 slab_reserved_bytes=' in allocation, allocation
+                assert 'replica=7381 slab_reserved_bytes=' in allocation, allocation
+                assert 'slab_internal_waste_bytes=' in allocation, allocation
                 assert ask(7381, 'GET city') == 'old', 'replica must receive SET'
                 assert ask(7000, 'INCR counter') == '1'
                 assert ask(7381, 'GET counter') == '1'

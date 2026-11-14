@@ -130,6 +130,18 @@ std::string Command::execute(
         return "OK";
     }
 
+    if (name == "ALLOCSTATS") {
+        std::shared_lock<std::shared_mutex> lock(writeMutex_);
+        const auto s = store_.allocatorStats();
+        return "slab_reserved_bytes=" + std::to_string(s.reservedBytes) +
+               " slab_live_bytes=" + std::to_string(s.liveBytes) +
+               " slab_cached_bytes=" + std::to_string(s.cachedBytes) +
+               " slab_internal_waste_bytes=" + std::to_string(s.internalWasteBytes) +
+               " large_live_bytes=" + std::to_string(s.largeLiveBytes) +
+               " slab_reuses=" + std::to_string(s.reusedAllocations) +
+               " slab_system_allocations=" + std::to_string(s.systemAllocations);
+    }
+
     if (name == "STATS") {
         std::shared_lock<std::shared_mutex> lock(writeMutex_);
         return "used_bytes=" + std::to_string(store_.usedBytes()) +

@@ -49,7 +49,8 @@ bool Protocol::isValid(
 
     const std::string& command = parts[0];
 
-    if (command == "STATS" || command == "PING" || command == "COUNT" ||
+    if (command == "STATS" || command == "ALLOCSTATS" ||
+        command == "PING" || command == "COUNT" ||
         command == "KEYS") {
         return parts.size() == 1;
     }

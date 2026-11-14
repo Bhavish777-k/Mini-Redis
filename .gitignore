@@ -1,0 +1,11 @@
+
+# Generated build files
+/build/
+/build-debug/
+/cluster-data/
+
+# Downloaded patch packages
+/fastkv_acceleration_pack/
+/fastkv_allocator_phase3/
+/fastkv_os_limits_phase4/
+/fastkv_replication_phase2/

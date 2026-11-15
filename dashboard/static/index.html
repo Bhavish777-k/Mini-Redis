@@ -21,16 +21,16 @@
         <a href="#telemetry" class="nav-item" data-nav="telemetry"><span class="nav-symbol">▥</span> Monitoring</a>
         <a href="#nodes" class="nav-item" data-nav="nodes"><span class="nav-symbol">▦</span> Cluster Nodes</a>
         <a href="#configure" class="nav-item" data-nav="configure"><span class="nav-symbol">⚙</span> Cluster Control</a>
-        <a href="#keys" class="nav-item" data-nav="keys"><span class="nav-symbol">▤</span> Key Browser</a>
         <a href="#console" class="nav-item" data-nav="console"><span class="nav-symbol">⌘</span> Key Console</a>
-        <a href="#backups" class="nav-item" data-nav="backups"><span class="nav-symbol">▣</span> Backups</a>
+        <a href="#keys" class="nav-item" data-nav="keys"><span class="nav-symbol">▤</span> Key Browser</a>
         <a href="#logs" class="nav-item" data-nav="logs"><span class="nav-symbol">≡</span> Events & Logs</a>
+        <a href="#backups" class="nav-item" data-nav="backups"><span class="nav-symbol">▣</span> Backups</a>
       </nav>
       <div class="sidebar-bottom">
         <div class="mode-dot-line"><span class="mode-dot"></span> DISTRIBUTED CACHE</div>
         <p>Connected through<br><strong>127.0.0.1:7001</strong></p>
         <div class="sidebar-divider"></div>
-        <p class="micro">FAST-KV ENGINE <span>v0.1.0</span></p>
+        <p class="micro">FAST-KV ENGINE</p>
       </div>
     </aside>
 
@@ -83,7 +83,7 @@
             <p class="form-note" id="control-note">Settings apply when starting a new manager. Existing clusters retain their startup limits.</p>
           </form>
           <div class="inner-separator"></div>
-          <h3>Developer key lifetime policy</h3>
+          <h3>Default key lifetime</h3>
           <p class="panel-description compact">Default applies to future writes from SDKs, CLI and dashboard when no explicit TTL is provided. Existing keys keep their current deadlines.</p>
           <form id="ttl-policy-form" class="settings-form">
             <label class="form-field">Default lifetime
@@ -105,8 +105,46 @@
           <form id="resize-form" class="resize-form"><label class="form-field">Node<select id="resize-node" name="port" required><option value="">Select a node</option></select></label><label class="form-field">New capacity (bytes)<input id="resize-capacity" name="capacity" type="number" min="1" max="1073741824" required placeholder="8192" /></label><button class="button button-outline" id="resize-btn" disabled type="submit">Apply resize</button></form>
         </section>
 
+        <section id="console" class="panel console-panel" aria-labelledby="console-title">
+          <div class="panel-heading">
+            <div><div class="section-kicker">03 / KEY OPERATIONS</div><h2 id="console-title">Key console</h2></div>
+            <span class="panel-icon">⌘</span>
+          </div>
+          <p class="panel-description">Run cache commands through the Fast-KV router. Keys and values use the current single-token format.</p>
+          <form id="key-form" class="key-form">
+            <label class="form-field">Command
+              <select id="key-action" name="action"><option>SET</option><option>GET</option><option>WHERE</option><option>INCR</option><option>DEL</option></select>
+            </label>
+            <label class="form-field">Key
+              <input name="key" maxlength="120" placeholder="product:101" required autocomplete="off" />
+            </label>
+            <label class="form-field" id="value-field">Value
+              <input name="value" maxlength="2048" placeholder="cached" autocomplete="off" />
+            </label>
+            <label class="form-field" id="console-ttl-field">Key lifetime
+              <select id="console-ttl-mode" name="ttl_mode">
+                <option value="default">Cache default</option>
+                <option value="keep">Keep existing TTL</option>
+                <option value="never">Never expire</option>
+                <option value="300">5 min</option>
+                <option value="3600">1 hour</option>
+                <option value="86400">24 hours</option>
+                <option value="custom">Custom</option>
+              </select>
+            </label>
+            <label class="form-field hidden" id="console-ttl-custom-field">Custom TTL (seconds)
+              <input id="console-ttl-custom" type="number" min="1" max="3153600000" value="1800" />
+            </label>
+            <button id="run-command" class="button button-primary" type="submit">Run command <span>↗</span></button>
+          </form>
+          <div class="console-output">
+            <div class="console-output-header"><span class="terminal-dot"></span> COMMAND OUTPUT</div>
+            <code id="command-output">&gt; Awaiting command...</code>
+          </div>
+        </section>
+
         <section id="keys" class="panel browser-panel" aria-labelledby="browser-title">
-          <div class="panel-heading"><div><div class="section-kicker">03 / DATA EXPLORER</div><h2 id="browser-title">Key browser</h2></div><button class="button button-muted" id="browser-refresh" type="button">↻ Refresh keys</button></div>
+          <div class="panel-heading"><div><div class="section-kicker">04 / DATA EXPLORER</div><h2 id="browser-title">Key browser</h2></div><button class="button button-muted" id="browser-refresh" type="button">↻ Refresh keys</button></div>
           <p class="panel-description">Browse keys across primary shards, inspect expiration, and edit values. Each page loads at most 15 keys. The key list may change during concurrent writes.</p>
           <div class="browser-layout">
             <div class="browser-list-panel">
@@ -131,21 +169,23 @@
                   </select>
                 </label>
                 <label id="browser-ttl-custom-field" class="form-field hidden">Custom TTL (seconds)<input id="browser-ttl-custom" type="number" min="1" max="3153600000" step="1" value="1800" /></label>
-                <p class="form-note" id="browser-key-info">New keys inherit the developer database default unless you override it. Existing keys can keep their deadline.</p>
+                <p class="form-note" id="browser-key-info">New keys inherit the cache default unless you override it. Existing keys can keep their deadline.</p>
                 <div class="browser-actions"><button class="button button-primary" type="submit" id="browser-save">Save key</button><button class="button button-outline" type="button" id="browser-apply-ttl" disabled>Apply TTL only</button><button class="button button-danger" type="button" id="browser-delete" disabled>Delete key</button></div>
               </form>
-              <p class="form-note">Developer database: writes use one router SET command with the selected lifetime. Keys and values use the current whitespace-free command format.</p>
+              <p class="form-note">Cache writes use one router SET command with the selected lifetime. Keys and values use the current whitespace-free command format.</p>
             </div>
           </div>
         </section>
 
-        <div class="bottom-grid">
-            <section id="console" class="panel console-panel"><div class="panel-heading"><div><div class="section-kicker">04 / INTERACT</div><h2>Key console</h2></div><span class="panel-icon">⌘</span></div><p class="panel-description">Read and write keys through the live Fast-KV router. Use single-word keys and values.</p>
-              <form id="key-form" class="key-form"><label class="form-field">Command<select id="key-action" name="action"><option>SET</option><option>GET</option><option>WHERE</option><option>INCR</option><option>DEL</option></select></label><label class="form-field">Key<input name="key" maxlength="120" placeholder="city" required autocomplete="off" /></label><label class="form-field" id="value-field">Value<input name="value" maxlength="2048" placeholder="gandhinagar" autocomplete="off" /></label><label class="form-field" id="console-ttl-field">Key lifetime<select id="console-ttl-mode" name="ttl_mode"><option value="default">Database default</option><option value="keep">Keep existing TTL</option><option value="never">Never expire</option><option value="300">5 min</option><option value="3600">1 hour</option><option value="86400">24 hours</option><option value="custom">Custom</option></select></label><label class="form-field hidden" id="console-ttl-custom-field">Custom TTL (seconds)<input id="console-ttl-custom" type="number" min="1" max="3153600000" value="1800" /></label><button id="run-command" class="button button-primary" type="submit">Run command <span>↗</span></button></form>
-              <div class="console-output"><div class="console-output-header"><span class="terminal-dot"></span> COMMAND OUTPUT</div><code id="command-output">&gt; Awaiting command...</code></div>
-            </section>
-            <section id="logs" class="panel events-panel"><div class="panel-heading"><div><div class="section-kicker">05 / ACTIVITY</div><h2>Recent events</h2></div><button id="logs-btn" class="button button-text" type="button">Manager logs ↗</button></div><div class="event-feed" id="event-feed"><p class="muted">No events yet.</p></div><pre class="log-output hidden" id="log-output"></pre></section>
-        </div>
+        <section id="logs" class="panel events-panel" aria-labelledby="events-title">
+          <div class="panel-heading">
+            <div><div class="section-kicker">05 / ACTIVITY</div><h2 id="events-title">Recent events</h2></div>
+            <button id="logs-btn" class="button button-text" type="button">Manager logs ↗</button>
+          </div>
+          <div class="event-feed" id="event-feed"><p class="muted">No events yet.</p></div>
+          <pre class="log-output hidden" id="log-output"></pre>
+        </section>
+
         <section id="backups" class="panel backup-panel" aria-labelledby="backups-title">
           <div class="panel-heading"><div><div class="section-kicker">06 / DATA SAFETY</div><h2 id="backups-title">Offline backup &amp; restore</h2></div><span class="panel-icon">▣</span></div>
           <p class="panel-description">Stop the cluster before creating or restoring a snapshot. Backups include append-only logs, TTL deadlines, shard metadata and saved dashboard settings. Existing data is preserved when you restore.</p>

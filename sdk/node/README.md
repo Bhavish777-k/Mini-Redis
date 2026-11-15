@@ -1,28 +1,30 @@
-# Fast-KV Node.js SDK (Phase 8)
+# Fast-KV Node.js SDK
 
-Local dependency (not published to npm):
+Dependency-free Node.js client for the Fast-KV router (Node.js 18+).
+
+## Install
+
+From the Fast-KV repository root:
 
 ```bash
 npm install ./sdk/node
 ```
 
-```js
-const {FastKV} = require('fastkv-client');
+## Example
 
-(async () => {
-  const db = new FastKV({host: '127.0.0.1', port: 7001});
-  await db.set('username', 'awnish');
-  console.log(await db.get('username'));
-  await db.set('session:101', 'active', {ttl: 60});
-  console.log(await db.ttl('session:101'));
-})();
+```js
+const { FastKV } = require('fastkv-client');
+
+async function main() {
+  const cache = new FastKV({ host: '127.0.0.1', port: 7001 });
+  await cache.set('product:101', 'cached', { ttl: 300 });
+  console.log(await cache.get('product:101'));
+  await cache.delete('product:101');
+}
+
+main().catch(console.error);
 ```
 
-No third-party dependencies. Node 18+. `timeout` uses milliseconds.
-Keys and values must be whitespace-free single tokens. `get()` maps `(nil)`
-to null; literal `(nil)` is ambiguous. `set(key, value, {ttl})` sends one
-router `SET ... EX` with manager-restart intent recovery (not strict power-loss
-atomicity). `{persist: true}` forces a permanent key, `{keepTTL: true}` retains
-its deadline, and plain `set()` inherits the developer database default set by
-`setDefaultTTL(secondsOrNull)`. Do not automatically retry writes after a network error; the write may have committed. The router
-has no TLS/authentication yet, so use localhost only.
+The client connects to the router with one TCP connection per command. Keys and values are single tokens without whitespace. `get()` maps `(nil)` to `null`, which makes the literal stored value `(nil)` ambiguous. Use `{ ttl }`, `{ persist: true }`, or `{ keepTTL: true }` to control expiration. Other writes inherit the cache's default TTL. Do not blindly retry a failed write: its outcome may be unknown.
+
+See the repository [README](../../README.md) for setup and usage.

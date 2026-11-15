@@ -2,8 +2,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const net = require('node:net');
-const {once} = require('node:events');
-const {FastKV, FastKVCommandError, FastKVConnectionError} = require('../index');
+const { once } = require('node:events');
+const { FastKV, FastKVCommandError, FastKVConnectionError } = require('../index');
 
 async function mockServer() {
   const commands = [];
@@ -20,7 +20,7 @@ async function mockServer() {
       const [op, k, v] = line.split(' ');
       let out = 'ERR unknown';
       if (op === 'PING') out = 'PONG';
-      if (op === 'TTLDEFAULT') { if (k === 'GET') out = defaultTTL === null ? 'never' : String(defaultTTL); else {defaultTTL = v === 'never' ? null : Number(v); out = 'OK';} }
+      if (op === 'TTLDEFAULT') { if (k === 'GET') out = defaultTTL === null ? 'never' : String(defaultTTL); else { defaultTTL = v === 'never' ? null : Number(v); out = 'OK'; } }
       if (op === 'SET') {
         const prior = expires.get(k);
         store.set(k, v);
@@ -51,17 +51,17 @@ async function mockServer() {
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
-  return {server, port: server.address().port, commands};
+  return { server, port: server.address().port, commands };
 }
 
 test('typed commands, TTL and error handling', async (t) => {
-  const {server, port, commands} = await mockServer();
+  const { server, port, commands } = await mockServer();
   t.after(() => server.close());
-  const db = new FastKV({port});
+  const db = new FastKV({ port });
   assert.equal(await db.ping(), true);
   assert.equal(await db.get('missing'), null);
   assert.equal(await db.where('missing'), null);
-  assert.equal(await db.set('session', 'active', {ttl: 15}), true);
+  assert.equal(await db.set('session', 'active', { ttl: 15 }), true);
   assert.equal(await db.get('session'), 'active');
   assert.equal(await db.ttl('session'), 15);
   assert.equal(await db.where('session'), 6381);
@@ -82,7 +82,7 @@ test('typed commands, TTL and error handling', async (t) => {
   assert.equal(await db.getDefaultTTL(), 300);
   assert.equal(await db.set('defaultKey', 'v'), true);
   assert.equal(await db.ttl('defaultKey'), 300);
-  assert.equal(await db.set('perm', 'v', {persist: true}), true);
+  assert.equal(await db.set('perm', 'v', { persist: true }), true);
   assert.equal(await db.ttl('perm'), -1);
   await assert.rejects(db.command('UNKNOWN'), FastKVCommandError);
   await assert.rejects(db.get('bad\nkey'), TypeError);
@@ -97,6 +97,6 @@ test('connection errors are surfaced', async () => {
   await once(server, 'listening');
   const port = server.address().port;
   await new Promise(resolve => server.close(resolve));
-  const db = new FastKV({port, timeout: 250});
+  const db = new FastKV({ port, timeout: 250 });
   await assert.rejects(db.ping(), FastKVConnectionError);
 });

@@ -1,7 +1,7 @@
-const {FastKV} = require('..');
+const { FastKV } = require('..');
 
 async function main() {
-  const db = new FastKV({port: 7001});
+  const db = new FastKV({ port: 7001 });
   await db.ping();
   await db.set('example:key', 'hello');
   console.log('value:', await db.get('example:key'));

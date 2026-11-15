@@ -28,3 +28,22 @@ security/
 /fastkv_remove_phase12/
 /fastkv_ttl_phase7/
 /fastkv_release/
+
+# Fast-KV generated files and runtime state
+/build-*/
+/.venv/
+**/__pycache__/
+*.py[cod]
+node_modules/
+.DS_Store
+/backups/
+/security/
+/dashboard/.manager.log
+/dashboard/.launcher.log
+/dashboard/.launcher.pid
+/dashboard/.last_config.json
+/fastkv_easy_install/
+/fastkv_final/
+/fastkv_dashboard_phase6/
+/fastkv_monochrome_theme/
+/fastkv_github*/

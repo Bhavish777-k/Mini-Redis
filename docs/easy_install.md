@@ -1,54 +1,61 @@
-# Installation and quick start
-
-Fast-KV is a distributed in-memory caching engine with a command-line launcher, cluster dashboard, and Python/Node.js SDKs.
+# Install and run Fast-KV
 
 ## Requirements
 
 - macOS or Linux
-- CMake 3.20+, a C++20 compiler, and Python 3.9+
-- Node.js 18+ only for the optional JavaScript SDK
+- C++20 compiler and CMake 3.20+
+- Python 3.9+
+- Node.js 18+ only for the optional Node.js SDK
 
-## Install
+## Installation
 
-From the project root:
+Clone this repository and run:
 
 ```bash
 bash scripts/install_local.sh
 ```
 
-The installer builds the engine and creates `~/.local/bin/fastkv`. To add that directory to your macOS shell PATH, put this in `~/.zprofile`:
+The installer compiles the engine and symlinks `fastkv` into `~/.local/bin`. Use `~/.local/bin/fastkv` directly, or add that directory to `PATH`:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Then open a new terminal. Alternatively, run `./bin/fastkv` from the repository.
+On macOS, add this to `~/.zprofile` for future terminal sessions.
 
-## Run Fast-KV
+## Start the cache
 
 ```bash
 fastkv start
 fastkv status
 fastkv dashboard
-fastkv stop
-fastkv shutdown
 ```
 
-`start` launches the dashboard when needed and starts a cluster using the saved settings. `status` shows cluster health and capacity. `dashboard` opens the web UI at `http://127.0.0.1:8765`. `stop` stops storage processes and preserves data. `shutdown` additionally stops the launcher-managed dashboard. `logs` displays recent manager events.
+The router listens on `127.0.0.1:7001`; the dashboard uses `http://127.0.0.1:8765`.
 
-Configure the cache explicitly:
+A new installation defaults to 64 MiB per node, a 60% scale-out threshold, up to three primary nodes, and one replica per primary. Existing installations reuse the saved configuration. Customize the settings using:
 
 ```bash
 fastkv start --capacity-mb 128 --max-nodes 3 --threshold 70 --replicas 1
 ```
 
-For new installations, defaults are 64 MiB per node, a 60% scale-out threshold, up to 3 primary nodes, and 1 replica per primary. Existing installations use saved cluster settings. `start` can reuse saved data without resetting the current cache.
+Stop storage processes while preserving their data:
 
-Scale-in is not implemented. Keep `--max-nodes` at least as large as the number of saved primary shards. To increase an existing node's capacity, use **Cluster Control → Increase node memory** in the dashboard.
+```bash
+fastkv stop
+```
 
-## SDKs
+Stop the cluster and a dashboard launched by `fastkv`:
 
-Python:
+```bash
+fastkv shutdown
+```
+
+Use `fastkv logs` to display recent events or `fastkv logs --dashboard` to inspect dashboard startup output. The dashboard's **Cluster Control** panel can raise a node's memory limit and edit the default key expiration policy.
+
+## Connect an application
+
+Install the Python SDK:
 
 ```bash
 python3 -m venv .venv
@@ -60,36 +67,24 @@ python -m pip install --no-cache-dir ./sdk/python
 from fastkv import FastKV
 
 cache = FastKV(port=7001)
-cache.set("product:101", "cached", ttl=300)
-print(cache.get("product:101"))
+cache.set("session:101", "active", ttl=1800)
+print(cache.get("session:101"))
 ```
 
-Node.js (run from the project root):
+For Node.js, see [Node.js SDK](../sdk/node/README.md). For a full cache-aside workflow, see [the example](../examples/cache_aside.py).
 
-```js
-const { FastKV } = require('./sdk/node');
-
-async function main() {
-  const cache = new FastKV();
-  await cache.set('product:101', 'cached', { ttl: 300 });
-  console.log(await cache.get('product:101'));
-}
-main().catch(console.error);
-```
-
-## Tests
+## Verification
 
 ```bash
 cmake --build build-debug -j4
 ctest --test-dir build-debug --output-on-failure
-python3 tests/test_easy_install.py ./build-debug/cluster-manager ./build-debug/fast-kv
+python3 tests/test_dashboard_layout.py
+python3 tests/test_sdk_phase8.py
+(cd sdk/node && npm test)
 ```
 
-Stop the main cluster/dashboard before running integration tests that use its ports.
+Integration tests require their network ports to be free. Stop your main cluster and dashboard before executing them.
 
-## Compatibility and deployment
+## Operational notes
 
-- The current line-based protocol accepts whitespace-free keys and values; standard Redis RESP clients are not supported.
-- The default deployment binds to loopback and does not provide API-key authentication or TLS. Restrict access to trusted hosts or place appropriate network controls in front of any remote deployment.
-- The launcher manages processes from the current user session; it is not a system service.
-- Offline backup and restore require the cluster to be stopped.
+The launcher manages processes for the current user session, not as a system service. Configuration and append-only storage are retained between restarts. Backup and restore are offline operations. Fast-KV uses a custom line protocol and does not accept Redis RESP clients. Without authentication or TLS, keep its endpoints on trusted networks with appropriate isolation; the bundled setup binds to loopback.

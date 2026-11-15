@@ -1,0 +1,33 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Configure
+        run: cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build-debug -j 4
+      - name: C++ tests
+        run: ctest --test-dir build-debug --output-on-failure
+      - name: Dashboard layout
+        run: python3 tests/test_dashboard_layout.py
+      - name: Python SDK tests
+        run: python3 tests/test_sdk_phase8.py
+      - name: Node.js SDK tests
+        run: cd sdk/node && npm test

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Fast-KV installer. Preserves cluster-data and backup archives.
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -33,17 +32,10 @@ if [[ -e "$TARGET" || -L "$TARGET" ]]; then
 else
   ln -s "$SOURCE" "$TARGET"
 fi
-# Local launcher status files should not be accidentally committed.
-for name in .launcher.log .launcher.pid; do
-  if ! grep -Fxq "$name" "$ROOT/dashboard/.gitignore" 2>/dev/null; then
-    printf '%s\n' "$name" >> "$ROOT/dashboard/.gitignore"
-  fi
-done
-printf '\nFast-KV installed!\n' 
+printf '\nFast-KV installed!\n'
 printf 'Try now: %s start\n' "$TARGET"
 printf 'Other commands: %s status | stop | dashboard | logs | shutdown\n' "$TARGET"
 if [[ ":$PATH:" != *":$PREFIX:"* ]]; then
   printf '\nTo use just `fastkv` in zsh, add this line to ~/.zprofile and open a new Terminal:\n'
   printf '  export PATH="%s:$PATH"\n' "$PREFIX"
 fi
-printf '\nInstallation complete. Run `fastkv start` to launch your cache.\n'

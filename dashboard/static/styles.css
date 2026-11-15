@@ -1,7 +1,4 @@
-/* Fast-KV — Monochrome Console
-   No external fonts, no animation-heavy effects, no coloured status-only signals.
-   Intended for the existing dashboard/static/index.html + app.js.
-*/
+/* Fast-KV dashboard */
 :root {
   color-scheme: light;
   --canvas: #f7f7f5;
@@ -166,7 +163,6 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .configure-panel { margin-top: 30px; }
 .configure-panel #start-form { grid-template-columns: repeat(4,minmax(0,1fr)); }
 .configure-panel #start-form .form-actions, .configure-panel #start-form .form-note { grid-column: 1 / -1; }
-.bottom-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.07fr); gap: 16px; margin-top: 39px; }
 .panel { min-width: 0; padding: 25px; background: white; border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
 .panel-icon { width: 33px; height: 33px; display: grid; place-items: center; flex: none; border: 1px solid #dcdcdc; border-radius: 8px; background: #f6f6f6; color: #444; font-size: 17px; }
 .panel-description { color: #5a5a5a; font-size: 13px; line-height: 1.7; margin: 15px 0 21px; }
@@ -194,6 +190,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .console-output-header { padding: 11px 14px; border-bottom: 1px solid #515151; color: #dedede; font-size: 11px; font-weight: 760; letter-spacing: .8px; }
 .terminal-dot { display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; border: 1px solid #dedede; background: #dedede; }
 .console-output code { display: block; padding: 15px; white-space: pre-wrap; overflow-wrap: anywhere; color: #fff; font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.console-panel, .events-panel { margin-top: 22px; }
 .events-panel { min-height: 188px; }
 .event-feed { display: grid; gap: 0; margin-top: 20px; }
 .event-row { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid #ededed; }
@@ -208,7 +205,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .toast { max-width: 400px; padding: 14px 18px; background: #171717; color: #fff; border: 1px solid #171717; border-radius: 9px; box-shadow: 0 10px 30px #0002; font-size: 13px; }
 .toast.error { background: #fff; color: #111; border: 2px solid #111; }
 
-/* Phase 10 — offline snapshots and explicit restore controls */
+/* Backup and restore */
 .backup-panel { margin-top: 20px; }
 .backup-controls { display: flex; align-items: end; gap: 13px; }
 .backup-controls .form-field { flex: 1; min-width: 0; }
@@ -224,7 +221,6 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   .sidebar { width: 220px; }
   .topbar { padding-inline: 25px; }
   .page-body { padding: 34px 25px; }
-  .bottom-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 930px) {
   .metric-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
@@ -248,7 +244,6 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   .intro-buttons { margin-top: 20px; }
   .metric-grid { margin: 27px 0 35px; }
   .metric-card { min-height: 140px; }
-  .bottom-grid { margin-top: 30px; }
 }
 @media (max-width: 470px) {
   .breadcrumbs { font-size: 11px; }
@@ -279,7 +274,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
 }
 
-/* Phase 9: readable, neutral performance telemetry (no external chart library). */
+/* Request metrics */
 .telemetry-panel{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:24px;margin:-24px 0 42px}
 .telemetry-heading,.sparkline-heading{display:flex;align-items:center;justify-content:space-between;gap:16px}
 .telemetry-heading h2{margin:8px 0 0;font-size:21px;letter-spacing:-.5px}
@@ -297,7 +292,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 @media(max-width:900px){.telemetry-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.telemetry-grid>div:nth-child(3){border-left:0;padding-left:0;border-top:1px solid var(--line)}.telemetry-grid>div:nth-child(4){border-top:1px solid var(--line)}}
 @media(max-width:520px){.telemetry-panel{padding:16px;margin:-4px 0 28px}.telemetry-heading{align-items:start;flex-direction:column;gap:5px}.telemetry-value{font-size:23px}.telemetry-grid>div+div{padding-left:10px}.telemetry-grid>div:nth-child(3){padding-left:0}.sparkline{height:46px}}
 
-/* Phase 11 — Key Browser, matching the monochrome dashboard */
+/* Key browser */
 .browser-panel { margin-top: 22px; }
 .browser-layout { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(320px, 1.2fr); gap: 24px; }
 .browser-list-panel { min-width: 0; border: 1px solid var(--line); border-radius: 12px; padding: 16px; background: var(--surface); }

@@ -542,7 +542,7 @@ class Controller:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "FastKV-Dashboard/0.1"
+    server_version = "FastKV-Dashboard"
 
     @property
     def control(self) -> Controller:

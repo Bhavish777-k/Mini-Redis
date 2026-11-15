@@ -1,34 +1,39 @@
-# Fast-KV Python SDK + CLI (Phase 8)
+# Fast-KV Python SDK and CLI
 
-Install locally from the project root:
+A dependency-free client for the Fast-KV router. Start Fast-KV before running your application.
+
+## Installation
+
+From the Fast-KV repository root:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e ./sdk/python
+python -m pip install --no-cache-dir ./sdk/python
 ```
+
+## Example
 
 ```python
 from fastkv import FastKV
 
-db = FastKV('127.0.0.1', port=7001)
-db.set('username', 'awnish')
-print(db.get('username'))
-db.set('session:101', 'active', ttl=60)
-print(db.ttl('session:101'))
-print(db.cluster_status())
+cache = FastKV(port=7001)
+cache.set("product:101", "cached", ttl=300)
+print(cache.get("product:101"))
+print(cache.ttl("product:101"))
+cache.delete("product:101")
 ```
 
-Interactive shell: `fastkv-cli` or `python3 -m fastkv`.
+## CLI
 
-One-shot: `fastkv-cli GET username` or `fastkv-cli --command 'CLUSTER STATUS'`.
+```bash
+fastkv-cli PING
+fastkv-cli GET product:101
+fastkv-cli --command 'CLUSTER STATUS'
+```
 
-The SDK uses **one TCP connection per command** to the **router**, not individual
-storage node ports. Only whitespace-free keys and values are supported by the
-current server protocol. `get()` maps `(nil)` to `None`, so the literal value
-`(nil)` is ambiguous. `set(..., ttl=...)` uses one router `SET ... EX`
-operation, with manager-restart intent recovery (not strict power-loss atomicity).
-`set(..., persist=True)` makes a key permanent; `set(..., keep_ttl=True)`
-retains an existing deadline; a plain `set()` inherits the database default,
-configured with `set_default_ttl(seconds_or_None)`. Never automatically retry mutations after a network failure:
-the write outcome may be unknown. Local self-hosted use only; no auth/TLS yet.
+The client opens one connection per command to the router (port `7001`). It supports single-token keys and values without whitespace. `get()` returns `None` for the protocol's `(nil)` response, so a literal stored value of `(nil)` is ambiguous.
+
+Use `ttl=seconds` for explicit expiry, `persist=True` for no expiry, or `keep_ttl=True` to preserve an existing deadline. Without those options, `set()` uses the cache's configured default TTL. A failed network write can have an unknown outcome; check the value before retrying a mutation.
+
+For installation and cache examples, see the repository [README](../../README.md).

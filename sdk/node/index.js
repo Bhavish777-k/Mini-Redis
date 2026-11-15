@@ -3,10 +3,10 @@
 const net = require('node:net');
 const MAX_LINE = 1024 * 1024;
 
-class FastKVError extends Error {}
-class FastKVCommandError extends FastKVError {}
-class FastKVConnectionError extends FastKVError {}
-class FastKVProtocolError extends FastKVError {}
+class FastKVError extends Error { }
+class FastKVCommandError extends FastKVError { }
+class FastKVConnectionError extends FastKVError { }
+class FastKVProtocolError extends FastKVError { }
 
 function token(value, field) {
   if (!(typeof value === 'string' || (typeof value === 'number' && Number.isSafeInteger(value)))) {
@@ -24,7 +24,7 @@ function integer(value, op) {
 }
 
 class FastKV {
-  constructor({host = '127.0.0.1', port = 7001, timeout = 3000} = {}) {
+  constructor({ host = '127.0.0.1', port = 7001, timeout = 3000 } = {}) {
     if (typeof host !== 'string' || !host) throw new TypeError('host must be nonempty');
     if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new RangeError('port must be 1..65535');
     if (!Number.isSafeInteger(timeout) || timeout <= 0) throw new RangeError('timeout must be positive milliseconds');
@@ -41,7 +41,7 @@ class FastKV {
     if (payload.length > MAX_LINE) throw new RangeError('command exceeds 1 MiB router limit');
 
     return new Promise((resolve, reject) => {
-      const socket = net.createConnection({host: this.host, port: this.port});
+      const socket = net.createConnection({ host: this.host, port: this.port });
       const chunks = [];
       let total = 0;
       let settled = false;
@@ -68,7 +68,7 @@ class FastKV {
         if (end >= 0) {
           const bytes = Buffer.concat(chunks, total);
           // Buffer.toString normally substitutes the replacement character; reject invalid UTF-8 explicitly.
-          const reply = new TextDecoder('utf-8', {fatal: true});
+          const reply = new TextDecoder('utf-8', { fatal: true });
           let text;
           try { text = reply.decode(bytes); }
           catch { return finish(new FastKVProtocolError('Router response is not UTF-8')); }
@@ -86,7 +86,7 @@ class FastKV {
   }
   async set(key, value, options = {}) {
     const k = token(key, 'key'), v = token(value, 'value');
-    const {ttl, persist = false, keepTTL = false} = options;
+    const { ttl, persist = false, keepTTL = false } = options;
     if (typeof persist !== 'boolean' || typeof keepTTL !== 'boolean') throw new TypeError('persist and keepTTL must be booleans');
     if (Number(ttl !== undefined) + Number(persist) + Number(keepTTL) > 1) {
       throw new TypeError('Choose only one of ttl, persist or keepTTL');
@@ -138,4 +138,4 @@ class FastKV {
   }
 }
 
-module.exports = {FastKV, FastKVError, FastKVCommandError, FastKVConnectionError, FastKVProtocolError};
+module.exports = { FastKV, FastKVError, FastKVCommandError, FastKVConnectionError, FastKVProtocolError };

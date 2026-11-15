@@ -1,68 +1,75 @@
 # Fast-KV
 
-**Distributed in-memory caching engine in modern C++.**
+**Distributed in-memory caching engine built in C++.**
 
-Fast-KV provides fast key-value access, expiration policies, bounded memory usage, automatic cluster scale-out, replica failover, and persistence through a single router endpoint. It includes a browser-based control plane and SDKs for Python and Node.js.
+Fast-KV stores frequently accessed application data in memory and distributes keys across storage nodes. A cluster manager handles capacity-based scale-out, replication, and primary failover. Developers connect through one router endpoint, use Python or Node.js SDKs, and manage the cache through a web dashboard.
 
-## Highlights
+## Features
 
-| Capability | What it provides |
+| Component | Capabilities |
 | --- | --- |
-| In-memory cache | `SET`, `GET`, `DEL`, `EXISTS`, `INCR` and other key-value operations |
-| Key expiration | Per-key TTL, database-wide default lifetime, and permanent keys |
-| Bounded memory | Configurable node capacities, custom slab allocator and LRU eviction |
-| Scale-out | Adds storage nodes when configurable utilization thresholds are crossed |
-| Replication & failover | Primary/replica topology with automatic promotion during tested primary failures |
-| Persistence | Append-only storage and restart recovery |
-| Developer experience | One-command startup, terminal CLI, Python and Node.js SDKs |
-| Control plane | Node health, live request metrics, cluster settings, key browser, and backup/restore |
+| Cache engine | `SET`, `GET`, `DEL`, `EXISTS`, `INCR`, key expiration and LRU eviction |
+| Cluster | Automatic scale-out at configurable memory thresholds, manual memory resize |
+| Availability | Primary/replica synchronization and automatic primary promotion |
+| Persistence | Append-only log and recovery after restart |
+| Observability | Node health, throughput, latency, and request errors |
+| Control plane | Cluster Control, Key Console, Key Browser, events and verified backups |
+| Developer tooling | One-command launcher, Python SDK, Node.js SDK and terminal CLI |
 
-## Architecture
+## How it works
 
 ```mermaid
 flowchart TD
     APP[Application / Python / Node.js] --> ROUTER[Fast-KV Router :7001]
-    ROUTER --> P1[Primary node 1]
-    ROUTER --> P2[Primary node 2]
-    ROUTER --> PN[Additional primaries as capacity grows]
-    P1 --> R1[Replica 1]
-    P2 --> R2[Replica 2]
-    PN --> RN[Replica N]
+    ROUTER --> P1[Primary A]
+    ROUTER --> P2[Primary B]
+    ROUTER --> PN[Additional primaries]
+    P1 --> R1[Replica A]
+    P2 --> R2[Replica B]
+    PN --> RN[Additional replicas]
     WEB[Dashboard :8765] --> MANAGER[Cluster Manager]
     MANAGER --> ROUTER
     MANAGER --> P1
     MANAGER --> P2
 ```
 
-The router provides a stable endpoint while the cluster manager supervises storage nodes, scaling decisions, and primary recovery.
+Applications use Fast-KV as a **cache-aside store**: read from Fast-KV first, load missing values from the primary database, and cache them with a TTL. On a source-data update, the application invalidates or refreshes the corresponding cache key.
 
-## Quick start
+## Get started
 
-**Requirements:** macOS or Linux, CMake 3.20+, a C++20 compiler, and Python 3.9+.
+### Requirements
+
+- macOS or Linux with a C++20 compiler and CMake 3.20+
+- Python 3.9+ for the launcher and Python SDK
+- Node.js 18+ if using the JavaScript SDK
+
+Clone the repository, then run from its root:
 
 ```bash
-# From the repository root
 bash scripts/install_local.sh
 ~/.local/bin/fastkv start
 ~/.local/bin/fastkv status
+~/.local/bin/fastkv dashboard
 ```
 
-Open the dashboard with `~/.local/bin/fastkv dashboard`, or visit `http://127.0.0.1:8765`.
+The dashboard opens at **http://127.0.0.1:8765**. Applications connect to the router at **127.0.0.1:7001**.
 
-The standard router endpoint is `127.0.0.1:7001`. To choose cache capacity and scale-out settings:
+For a custom cluster:
 
 ```bash
 ~/.local/bin/fastkv start --capacity-mb 128 --max-nodes 3 --threshold 70 --replicas 1
 ```
 
-For shutdown:
+Stop the cache safely:
 
 ```bash
 ~/.local/bin/fastkv stop
 ~/.local/bin/fastkv shutdown
 ```
 
-## Python example
+`stop` preserves data and leaves the dashboard running; `shutdown` also closes the launcher-managed dashboard. To use the shorter `fastkv` command, add `~/.local/bin` to your `PATH` as described in [installation](docs/easy_install.md).
+
+## Python SDK
 
 ```bash
 python3 -m venv .venv
@@ -74,15 +81,13 @@ python -m pip install --no-cache-dir ./sdk/python
 from fastkv import FastKV
 
 cache = FastKV(port=7001)
-cache.set("session:42", "active", ttl=1800)
-print(cache.get("session:42"))
-
-cache.set("page:views", 0)
-cache.incr("page:views")
-print(cache.get("page:views"))
+cache.set("product:101", "cached", ttl=300)
+print(cache.get("product:101"))
+cache.incr("requests")
+cache.delete("product:101")
 ```
 
-## Node.js example
+## Node.js SDK
 
 From the repository root:
 
@@ -91,64 +96,60 @@ const { FastKV } = require('./sdk/node');
 
 async function main() {
   const cache = new FastKV();
-  await cache.set('product:42', 'cached', { ttl: 300 });
-  console.log(await cache.get('product:42'));
+  await cache.set('product:101', 'cached', { ttl: 300 });
+  console.log(await cache.get('product:101'));
 }
+
 main().catch(console.error);
 ```
 
 ## Dashboard
 
-The dashboard groups the main workflows in this order:
+The control plane presents features in workflow order:
 
-1. **Cluster Overview & Monitoring** — throughput, latency, and node health.
-2. **Cluster Control** — start/stop, node memory, autoscaling thresholds, replication, and default TTL.
-3. **Key Browser** — find, create, update, expire, and delete keys.
-4. **Key Console & Events** — execute commands and inspect manager events.
-5. **Backups** — create, verify, and restore offline archives.
+1. **Overview and Monitoring** — cluster health and request metrics
+2. **Cluster Nodes** — memory usage and replica status
+3. **Cluster Control** — start/stop, capacity, scaling and key lifetime policy
+4. **Key Console** — execute cache commands and inspect results
+5. **Key Browser** — list, search, edit, and expire keys
+6. **Events and Backups** — inspect recent activity and manage verified offline backups
 
-## Test suite
+## Tests
 
 ```bash
 cmake -S . -B build-debug
 cmake --build build-debug -j4
 ctest --test-dir build-debug --output-on-failure
+python3 tests/test_dashboard_layout.py
+python3 tests/test_sdk_phase8.py
+(cd sdk/node && npm test)
 ```
 
-Integration checks for features live under `tests/`. To verify launcher behavior, stop the active cluster first and run:
+To run the launcher integration test, first stop the active cluster and dashboard:
 
 ```bash
 python3 tests/test_easy_install.py ./build-debug/cluster-manager ./build-debug/fast-kv
 ```
 
-For Python SDK tests:
+More tests live in `tests/`; performance tools are in `benchmarks/`.
 
-```bash
-python3 tests/test_sdk_phase8.py
-```
-
-For the Node.js SDK:
-
-```bash
-(cd sdk/node && npm test)
-```
-
-## Project layout
+## Repository structure
 
 ```text
-bin/              Fast-KV launcher
-cluster/          Cluster manager and router
-src/, include/    C++ engine, protocol, memory, and persistence
-sdk/python/       Python SDK and CLI
-sdk/node/         Node.js SDK
-dashboard/        Web dashboard and backup operations
-tests/            Unit and integration tests
-benchmarks/       Benchmark tooling and recorded results
-docs/             Installation and technical guides
+bin/             Local launcher
+cluster/         Cluster manager and router
+src/, include/   C++ engine, protocol, memory and persistence
+sdk/python/      Python client and CLI
+sdk/node/        Node.js client
+dashboard/       Dashboard and backup management
+examples/        Application caching examples
+tests/           Unit and integration tests
+benchmarks/      Benchmark tools
+docs/            Setup and technical guidance
 ```
 
-## Compatibility & deployment
+## Compatibility and security
 
-Fast-KV uses its own line-based protocol, with whitespace-free keys and values; it is not wire-compatible with Redis RESP clients. The default setup uses loopback networking and does not include authentication or TLS. Use trusted environments and appropriate network isolation for deployment. Backup/restore operations are offline, and automatic scale-in is not implemented.
+Fast-KV uses a line-based command protocol with whitespace-free key/value tokens, rather than Redis RESP. The current default configuration binds to loopback and has no authentication or TLS; use network isolation if integrating it into a larger environment. Backups require the cluster to be stopped, and automatic scale-in is not included.
 
-For configuration details, see [Installation and quick start](docs/easy_install.md).
+See [installation](docs/easy_install.md) and the [cache-aside example](examples/cache_aside.py) for usage details.
